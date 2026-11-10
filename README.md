@@ -428,8 +428,4 @@ they belong to their respective owners.
 
 
 ### Future Plans
-
-This initial release should be pretty well put together from what I can tell, but if this gets a broader audience and issues are found;
-I will try to update and maintain this.  Getting to Mojave, isn't the ultimate goal though.  I want to try to work on getting this shim
-across the hurdle of the jump to Catalina.  If I can make a 32-bit compatibility layer and get it working on a Catalina, I'm going to try
-to take it even further all the way to Golden Gate.  These are big ifs though and there are not promissies.
+Checkout Rossetus for Catalina and potentially a future port all the way to Golden Gate.
