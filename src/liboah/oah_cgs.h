@@ -595,6 +595,7 @@ static void oah_mb_schedule(void) {
    would: the previous front app is made front without raising its windows (kCPSNoWindows),
    then this one (kCPSUserGenerated), and the bars are set again. OAH_MB_NOHANDOFF=1 skips it.
    Called from the bridge and event paths (main thread), at most every 250 ms. */
+static void oah_mb_menu_closed(void);
 static void oah_mb_tick(int force) {
     /* Front process from the window server (CPS), not LaunchServices: launchservicesd waits on
        this app during a switch (its notifications go unanswered), and a blocking LS call made
@@ -633,6 +634,12 @@ static void oah_mb_tick(int force) {
             if (mw) oah_mb_render(mw);
             oah_mb_publish();
         }
+    /* A menu closed within 0.3 s of the click (a quick click-release, the same title clicked
+       again, an item chosen at once) left its title highlighted and the bar still tracking:
+       oah_mb_menu_closed waits that long for the menu to open and nothing called it again, so
+       the title stayed blue and moving the mouse highlighted the other titles. Check again here
+       once the time is up. (Rosettus for Mojave 1.1, from the Catalina port.) */
+    if (g_mb_tracking && t - g_mb_trackt >= 0.35) oah_mb_menu_closed();
     if (!force && t - last < 0.25) return;
     last = t;
     if (!init) {
@@ -960,7 +967,8 @@ static void oah_mb_menu_closed(void) {
     if (!g_mb_tracking) return;
     for (i = 0; i < OAH_MAXWIN; i++)
         if (g_cgswin[i].wid && g_cgswin[i].seq > g_mb_trackseq && g_cgswin[i].ordered && g_cgswin[i].wid != g_menubar_wid) return;
-    if (CFAbsoluteTimeGetCurrent() - g_mb_trackt < 0.3) return;     /* the menu has not opened yet */
+    if (CFAbsoluteTimeGetCurrent() - g_mb_trackt < 0.3) return;     /* the menu has not opened yet (oah_mb_tick checks again) */
+    CGSLOG("[cgs] menu bar: menu closed, tracking ends\n");
     g_mb_tracking = 0; g_mb_hx0 = g_mb_hx1 = 0;
     if (w) oah_mb_render(w);
 }
@@ -1022,6 +1030,13 @@ static void oah_mb_render(oah_cgswin_t *w) {
                 oah_cgs_nrelease(nr);
                 p_CGSSetWindowOpacity(g_ncid, g_mbimg[k], 0);
                 oah_set_window_scale(g_mbimg[k], oah_display_scale());   /* Retina: text drawn at 2x */
+                {   /* no window shadow: the image windows' shadow is a blurred dark copy of the
+                       titles under them (visible in light mode; dark mode hides it).
+                       kCGSNoShadowTagBit = 1 << 3. OAH_MB_SHADOW=1 keeps the shadow. */
+                    NCGS(int, CGSSetWindowTags, (unsigned int, unsigned int, unsigned int *, int));
+                    unsigned int tg[2] = { 1u << 3, 0 };
+                    if (p_CGSSetWindowTags && !getenv("OAH_MB_SHADOW")) p_CGSSetWindowTags(g_ncid, g_mbimg[k], tg, 64);
+                }
             }
             if (!g_mbctx[k]) g_mbctx[k] = p_CGWindowContextCreate(g_ncid, g_mbimg[k], 0);
         }

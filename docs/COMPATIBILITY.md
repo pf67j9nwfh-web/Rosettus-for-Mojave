@@ -107,6 +107,21 @@ Known gaps:
 * Kernel extensions and input methods in PowerPC code cannot load.
 * AltiVec code runs, but slower than on a G4/G5.
 
+## Test results for Rosettus for Mojave 1.1
+
+The full app test was run again on the 1.1 library (shared install, apps opened through their
+launchers in `/Applications/Rosettus`), with the same steps as for 1.0 below. Every app passed the
+same steps as with 1.0: AppleWorks 6, TextWrangler, Hex Fiend, Office 2004 (Word 10/10, Excel 10/10,
+PowerPoint 10/10, Entourage 9/9, Project Gallery Launcher 5/5), Keynote, Pages and Numbers (11/11),
+iWeb, Internet Explorer, Mactracker, The Unarchiver, Transmission, xACT, Fractal Explorer, Kid Pix
+Deluxe 4, Equation Editor (9/9), Photoshop, GoLive (12/12), Illustrator and InDesign CS2 (11/11),
+blender (26/26), the G4 demos, the Office helpers, the Drop utilities and SimCity 4 (`sc4test.py`
+4/4). Acrobat 7 Professional stops at its first-run dialog as with 1.0 (2/4).
+
+Also checked for 1.1: clicking a menu title twice leaves no highlighted title behind and moving the
+mouse along the bar afterwards highlights nothing; the menu bar titles of PowerPC apps have no shadow
+in Light Mode.
+
 ## Test results for Rosettus 1.0
 
 Run on the installed 1.0 package (shared install in `/Library/Rosettus`, apps opened through their

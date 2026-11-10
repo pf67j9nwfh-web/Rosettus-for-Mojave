@@ -187,7 +187,7 @@ static pid_t find_running(const char *guest) {
         while (q < end && !*q) q++;
         if (argc < 2) continue;
         {   const char *a0 = q, *b = strrchr(a0, '/'); b = b ? b + 1 : a0;
-            if (!strstr(b, "translate")) continue; }   /* a PowerPC process (translate, .rosetta-translate) */
+            if (!strstr(b, "translate") && strcmp(b, "rhost")) continue; }   /* a PowerPC process (translate, .rosetta-translate; rhost under Rosettus 2) */
         for (k = 0; k < argc && q < end; k++) {
             if (k > 0 && same_guest(q, guest)) { free(buf); return pids[i]; }
             q += strnlen(q, end - q) + 1;

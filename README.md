@@ -1,6 +1,6 @@
-# Rosettus
+# Rosettus for Mojave
 
-Rossettus is a compatibility layer that allows you to run PowerPC Mac applications on **macOS 10.14 Mojave**, using the Rosetta translator from your own
+Rosettus for Mojave (formerly Rosettus) is a compatibility layer that allows you to run PowerPC Mac applications on **macOS 10.14 Mojave**, using the Rosetta translator from your own
 **Mac OS X 10.6 Snow Leopard** installation or installation disc.
 
 Apple removed Rosetta in Mac OS X 10.7 as an OS component but Rosettus restores almost all of that functionality.
@@ -23,6 +23,9 @@ TextWrangler, Adobe CS2, Transmission, and Hex Fiend. See [docs/COMPATIBILITY.md
 > with Rosetta installed or a Snow Leopard installation disc. A script copies the files Rosetta needs from it. 
 > The repository holds only  this project's own code, a list of the files to copy (names and checksums), 
 > and small binary patches containing only the bytes this project changes.
+
+**Rosettus for Mojave 1.1** is the current release: see [RELEASE_NOTES.md](RELEASE_NOTES.md).
+For macOS 10.15 Catalina there is a separate port, **Rosettus for Catalina**.
 
 ## Requirements
 
@@ -84,7 +87,7 @@ own folder, TextWrangler, AppleWorks, Word, Kid Pix and Photoshop start and all 
 
 ### Installing for every account (installer package)
 
-`tools/mkpkg.sh VERSION` builds **`dist/Rosettus VERSION.pkg`**, a standard installer package that
+`tools/mkpkg.sh VERSION` builds **`dist/Rosettus for Mojave VERSION.pkg`**, a standard installer package that
 installs for all users of the Mac:
 
 * **Rosettus Launcher** goes to `/Applications`, and a setup kit (scripts, patches, checksums;
@@ -108,6 +111,7 @@ Terminal: `sudo ./install.sh --system Rosettus-SL-export.tar.gz`; remove it with
 ![Rosettus Launcher](docs/images/launcher.png)
 
 Rosettus Launcher lists the PowerPC programs in `/Applications`, `~/Applications`, `~/Downloads`, and
+the screen saver folders.
 
 **Patch All…** patches every listed app that can be changed, after asking.
 
@@ -147,14 +151,45 @@ The app itself is never patched. The PowerPC launcher has its own bundle identif
 
 This is useful when an app's Intel version misbehaves, or when it needs a PowerPC-only plug-in. From Terminal, `rosettus /path/App.app` runs the PowerPC version of a Universal app too.
 
-From Terminal:
+From Terminal (`R` is `/Library/Rosettus` for the installer package's shared install, or
+`~/Library/Rosettus` for a per-user install):
 
 ```
-~/Library/Rosettus/rosettus /Applications/SomeApp.app            # run an app
-~/Library/Rosettus/rosettus /path/to/ppc-tool --args              # run a command-line tool
-python ~/Library/Rosettus/rosettus_patch.py /Applications/SomeApp.app       # patch
-python ~/Library/Rosettus/rosettus_patch.py --unpatch /Applications/SomeApp.app
+$R/rosettus /Applications/SomeApp.app            # run an app
+python $R/rosettus_patch.py /Applications/SomeApp.app       # patch
+python $R/rosettus_patch.py --unpatch /Applications/SomeApp.app
 ```
+
+### Command-line tools
+
+PowerPC command-line programs (Unix tools, compilers, helpers) run through the same `rosettus`
+command. Mojave's kernel cannot start them itself: typed directly, a PowerPC tool fails with
+*Bad CPU type in executable*.
+
+```
+/Library/Rosettus/rosettus /path/to/ppc-tool arg1 "arg 2"        # shared install
+~/Library/Rosettus/rosettus ./ppc-tool --help                      # per-user install, relative path
+some-command | /Library/Rosettus/rosettus /path/to/ppc-filter > out.txt
+```
+
+The tool runs like a native one: it gets its arguments, environment and current folder, reads
+standard input (a pipe, a file, or the terminal for interactive tools), writes standard output and
+error, and `rosettus` exits with the tool's exit status, so it works in scripts and pipelines. Ctrl-C
+stops it as usual. Rosettus's own messages do not mix with the tool's output: they go to
+`~/Library/Logs/Rosettus/tools.log` (`OAH_TOOL_STDERR=1` keeps them on stderr, see
+[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)).
+
+To type just the tool's name, put `rosettus` on your `PATH`, or wrap a tool in a small script:
+
+```
+sudo ln -s /Library/Rosettus/rosettus /usr/local/bin/rosettus   # then: rosettus ppc-tool ...
+printf '#!/bin/sh\nexec /Library/Rosettus/rosettus /path/to/ppc-tool "$@"\n' > ~/bin/ppc-tool
+chmod +x ~/bin/ppc-tool                                              # then: ppc-tool ...
+```
+
+Tools that a PowerPC app starts itself (helper commands, shell scripts and the PowerPC programs they
+run) need none of this: Rosettus sends them through the translator automatically (see *Helper
+programs and scripts* below). For PowerPC Java there is `rjava` (see [PowerPC Java](#powerpc-java-optional)).
 
 ### Running PowerPC apps
 
@@ -385,9 +420,11 @@ copy; Rosettus does not include them. Delete
 ## Legal
 
 Rosettus is not affiliated with Apple. Rosetta, Mac OS X and the frameworks it uses are Apple's
-software. `src/liboah/cp_data.h` is the PowerPC commpage from xnu (Apple Public Source License 2.0). 
-Everything else in this repository is under the MIT License ([LICENSE](LICENSE)). 
-Screenshots show third-party applications for illustration only; they belong to their respective owners.
+software. They are copied only from a Snow Leopard installation that you own, onto your own Mac,
+for interoperability with your own PowerPC software. `src/liboah/cp_data.h` is the PowerPC commpage
+from xnu (Apple Public Source License 2.0). Everything else in this repository is under the MIT
+License ([LICENSE](LICENSE)). Screenshots show third-party applications for illustration only;
+they belong to their respective owners.
 
 
 ### Future Plans

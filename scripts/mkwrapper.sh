@@ -74,7 +74,7 @@ case "$PARENT" in /Applications|$HOME/Applications|$HOME|$HOME/Desktop|$HOME/Dow
   MIRROR=1
   for sib in "$PARENT"/*; do b=$(basename "$sib"); [ "$sib" = "$SRC" ] && continue
     case "$b" in *.app) continue;; esac
-    [ -e "$LDIR/$b" ] || ln -sn "$sib" "$LDIR/$b"; done
+    [ -e "$LDIR/$b" ] || ln -sfn "$sib" "$LDIR/$b"; done   # -f: a dangling link from an older copy of the app
   fi;;
 esac
 W="$WDIR/$NAME.app"
@@ -100,7 +100,7 @@ if [ ! -e "\$LINK" ]; then
   mkdir -p "\$(dirname "\$LINK")" 2>/dev/null
   ln -sfn "$SRC" "\$LINK" 2>/dev/null || { mkdir -p "\$HOME/.rosettus-apps"; LINK="\$HOME/.rosettus-apps/\$(basename "\$LINK")"; ln -sfn "$SRC" "\$LINK"; }
   if [ "$MIRROR" = 1 ]; then for sib in "$PARENT"/*; do b=\$(basename "\$sib"); case "\$b" in *.app) continue;; esac
-    [ -e "\$(dirname "\$LINK")/\$b" ] || ln -sn "\$sib" "\$(dirname "\$LINK")/\$b" 2>/dev/null; done; fi
+    [ -e "\$(dirname "\$LINK")/\$b" ] || ln -sfn "\$sib" "\$(dirname "\$LINK")/\$b" 2>/dev/null; done; fi
 fi
 exec ./rosettus "\$LINK" > "\$LOG" 2>&1
 EOF

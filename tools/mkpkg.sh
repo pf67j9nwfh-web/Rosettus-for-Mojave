@@ -1,5 +1,5 @@
 #!/bin/bash
-# tools/mkpkg.sh [VERSION] - build "Rosettus.pkg" in dist/.
+# tools/mkpkg.sh [VERSION] - build "Rosettus for Mojave VERSION.pkg" in dist/.
 #
 # The package contains only this project's files (no Apple software), like the repository:
 #   /Applications/Rosettus Launcher.app      the GUI, for every user
@@ -45,6 +45,7 @@ find "$S" -name .DS_Store -delete
 cp -R "$R/bin/Rosettus Launcher.app" "$W/root/Applications/"
 /usr/libexec/PlistBuddy -c "Delete :RosettusRoot" "$W/root/Applications/Rosettus Launcher.app/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :RosettusRoot string /Library/Rosettus" "$W/root/Applications/Rosettus Launcher.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $V" "$W/root/Applications/Rosettus Launcher.app/Contents/Info.plist"   # the release shows in Get Info / About
 codesign -f -s - "$W/root/Applications/Rosettus Launcher.app" 2>/dev/null || true
 
 cat > "$W/scripts/postinstall" <<'EOF'
@@ -77,12 +78,23 @@ exit $st
 EOF
 chmod 755 "$W/scripts/postinstall"
 
-pkgbuild --root "$W/root" --scripts "$W/scripts" --identifier io.github.rosettus --version "$V" \
+# Bundles are not relocatable: Rosettus Launcher.app is in the payload twice (in /Applications and in
+# Setup/bin, with the same bundle identifier). With relocation (pkgbuild's default) an upgrade over an
+# installed copy sent both to /Applications and failed: "Rosettus Launcher.app couldn't be moved to
+# Applications because an item with the same name already exists".
+pkgbuild --analyze --root "$W/root" "$W/components.plist" >/dev/null
+i=0
+while /usr/libexec/PlistBuddy -c "Print :$i:RootRelativeBundlePath" "$W/components.plist" >/dev/null 2>&1; do
+  /usr/libexec/PlistBuddy -c "Delete :$i:BundleIsRelocatable" "$W/components.plist" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :$i:BundleIsRelocatable bool false" "$W/components.plist"
+  i=$((i + 1))
+done
+pkgbuild --root "$W/root" --scripts "$W/scripts" --component-plist "$W/components.plist" --identifier io.github.rosettus --version "$V" \
          --install-location / --ownership recommended "$W/Rosettus.pkg" >/dev/null
 
 cat > "$W/res/welcome.html" <<'EOF'
 <html><body style="font-family:-apple-system,Helvetica;font-size:13px">
-<h2>Rosettus</h2>
+<h2>Rosettus for Mojave</h2>
 <p>Runs PowerPC Mac applications on macOS 10.14 Mojave with the Rosetta translator from Mac OS X 10.6 Snow Leopard.</p>
 <p>This package installs <b>Rosettus Launcher</b> in the Applications folder and the Rosettus runtime in
 <code>/Library/Rosettus</code>, for every user account on this Mac.</p>
@@ -107,7 +119,7 @@ EOF
 cat > "$W/dist.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-    <title>Rosettus</title>
+    <title>Rosettus for Mojave $V</title>
     <welcome file="welcome.html" mime-type="text/html"/>
     <conclusion file="conclusion.html" mime-type="text/html"/>
     <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="x86_64"/>
@@ -119,6 +131,6 @@ cat > "$W/dist.xml" <<EOF
     <pkg-ref id="io.github.rosettus" version="$V" onConclusion="none">Rosettus.pkg</pkg-ref>
 </installer-gui-script>
 EOF
-OUT="$R/dist/Rosettus $V.pkg"
+OUT="$R/dist/Rosettus for Mojave $V.pkg"
 productbuild --distribution "$W/dist.xml" --resources "$W/res" --package-path "$W" "$OUT" >/dev/null
 echo "built $OUT ($(du -h "$OUT" | cut -f1))"

@@ -54,7 +54,28 @@ if [ $UPDATE = 0 ]; then
   say "Unpacking the Snow Leopard files into $ROOT (3.3 GB)..."
   if [ -d "$EXPORT" ]; then (cd "$EXPORT" && tar cf - .) | (cd "$ROOT" && tar xf -)
   else tar xzf "$EXPORT" -C "$ROOT"; fi
+  # exports made in the C locale have mangled non-ASCII names (Hiragino and Chinese fonts): repair them
+  /usr/bin/python "$REPO/tools/fix_names.py" "$ROOT" | tail -1
   [ -f "$ROOT/translate.decoded" ] || die "the export has no translate.decoded - was it made by export_from_sl.sh?"
+  # An export made by an older Rosettus lacks files added to the manifest since (Snow Leopard's X11,
+  # QuickTime codec components, the spelling service, ...): the install works, but those features do
+  # not.
+  nmiss=$(/usr/bin/python - "$REPO/import/manifest.tsv.gz" "$ROOT" <<'PY'
+import gzip, os, sys
+n = 0
+for l in gzip.open(sys.argv[1]):
+    f = l.decode('utf-8').rstrip('\n').split('\t')
+    # (non-ASCII names are left out: fix_names.py repairs those, and their normalization varies)
+    if len(f) > 1 and f[1] != 'optional' and not any(ord(c) > 127 for c in f[0]) \
+       and not os.path.lexists(os.path.join(sys.argv[2], f[0])): n += 1
+print(n)
+PY
+)
+  if [ "${nmiss:-0}" -gt 0 ]; then
+    echo "WARNING: $nmiss files this release needs are not in the Snow Leopard export (made by an older"
+    echo "         Rosettus?). X11 programs, some QuickTime codecs and spell checking will not work."
+    echo "         Make a new export with this release's Snow Leopard Export Kit and install again."
+  fi
   if ! xattr -p com.apple.FinderInfo "$ROOT/System/Library/CFMSupport/CarbonLib" >/dev/null 2>&1; then
     echo "WARNING: this export has no resource forks (it was copied without them)."
     echo "         Carbon CFM apps (AppleWorks, Office 2004, ...) will fail with cfragNoLibraryErr and"

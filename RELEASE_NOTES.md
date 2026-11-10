@@ -1,4 +1,40 @@
-# Rosettus 1.0 release notes
+# Rosettus for Mojave release notes
+
+Rosettus 1.0 is now called **Rosettus for Mojave**. The port to macOS 10.15 Catalina is a separate
+project, **Rosettus for Catalina**.
+
+## Rosettus for Mojave 1.1
+
+**November 9, 2026 - a bug-fix release.**
+
+Two menu bar fixes, brought back from Rosettus for Catalina:
+
+* **A menu title no longer stays highlighted.** Clicking a menu title and then clicking it again to
+  close the menu (or choosing an item very quickly) left the title highlighted in blue, and moving
+  the mouse along the menu bar then highlighted the other titles too, until the next menu was
+  opened. A menu that closes within 0.3 seconds of the click is now noticed shortly afterwards and
+  the menu bar goes back to normal.
+* **No shadow under the menu bar text.** The titles of a PowerPC app's menus had a faint, blurred
+  dark copy of themselves underneath (the shadow of the windows that carry them). It was hard to
+  see in Dark Mode but noticeable in Light Mode. The shadow is now turned off
+  (`OAH_MB_SHADOW=1` brings it back).
+
+Also in this release:
+
+* The launcher stub of patched apps (`rlaunch`) also recognizes an app already running under
+  Rosettus for Catalina's host process, and the private `bash` used for scripts of PowerPC programs
+  sends i386-and-PowerPC tools to Rosettus on systems that cannot run 32-bit code. Neither changes anything on Mojave; they let
+  the same sources serve Rosettus for Catalina.
+* PowerPC command-line tools whose standard error is redirected to a file (`tool 2> errors.txt`)
+  no longer get Rosettus's own messages in that file; they go to `~/Library/Logs/Rosettus/tools.log`
+  as they already did for a terminal or a pipe.
+* The README describes the project in more detail, with a new section on running PowerPC
+  command-line tools from Terminal.
+
+Installing: open **Rosettus for Mojave 1.1.pkg**. It replaces 1.0 in place; launchers and patched
+apps keep working. Nothing needs to be imported again.
+
+## Rosettus 1.0
 
 **October 31, 2026 - the first release.**
 
@@ -6,7 +42,7 @@ Rosettus runs PowerPC Mac applications on macOS 10.14 Mojave, using the Rosetta 
 own Mac OS X 10.6 Snow Leopard installation. No Apple software is included: Rosettus copies the files
 Rosetta needs from a Snow Leopard Mac or a Snow Leopard install DVD.
 
-## What's included
+### What's included
 
 * **Rosettus Launcher** (in `/Applications`): imports the Snow Leopard files, finds PowerPC apps,
   makes launchers for them, and opens them with a double-click, from the Dock or from the Finder.
@@ -20,7 +56,7 @@ Rosetta needs from a Snow Leopard Mac or a Snow Leopard install DVD.
 * **The shim library** (`liboah_mojave.dylib`), which connects the PowerPC system frameworks to
   Mojave's window server, events, audio, OpenGL, clipboard, Launch Services and Apple Events.
 
-## What works
+### What works
 
 Apps tested include:
 
@@ -41,13 +77,13 @@ Other things that work:
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) lists every app and feature tested, and what is known
 not to work.
 
-## Requirements
+### Requirements
 
 * macOS 10.14 Mojave. 32-bit code does not run on 10.15 or later.
 * About 4 GB free.
 * Mac OS X 10.6.8 with Rosetta, or a Snow Leopard install DVD or disc image.
 
-## Known issues
+### Known issues
 
 * PowerPC Java:
   * A Java program that dereferences `null` (or otherwise relies on the JVM's own fault handling)

@@ -10,7 +10,7 @@ import Quartz as Q
 
 HOME = os.path.expanduser('~')
 APP = sys.argv[1] if len(sys.argv) > 1 else 'SimCity 4 Rush Hour'
-WRAP = os.path.join(HOME, 'Applications/Rosettus', APP + '.app')
+WRAP = os.path.join(os.environ.get('BEHAVE_WRAPDIR') or os.path.join(HOME, 'Applications/Rosettus'), APP + '.app')
 STAMP = time.strftime('%Y%m%d-%H%M%S')
 OUT = os.path.join(HOME, 'Library/Logs/Rosettus/Behave', 'SimCity_4-' + STAMP)
 os.makedirs(OUT)

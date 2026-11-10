@@ -13,6 +13,15 @@
 #include <unistd.h>
 #include <libkern/OSByteOrder.h>
 
+/* 1 when this Mac's kernel runs no 32-bit code (macOS 10.15+, Darwin 19+): then a PowerPC program
+   whose only Intel part is i386 (xACT's shntool, shorten: i386 + ppc) must go to Rosettus too
+   ("Bad CPU type in executable" under Rosettus 2 on Catalina) */
+#include <sys/utsname.h>
+static int no_i386(void) {
+    static int v = -1;
+    if (v < 0) { struct utsname u; v = !uname(&u) && atoi(u.release) >= 19; }
+    return v;
+}
 static int is_ppc_only(const char *path) {
     unsigned char h[4096]; int fd = open(path, O_RDONLY), n, ppc = 0, x86 = 0; unsigned int k, nf;
     if (fd < 0) return 0;
@@ -24,7 +33,7 @@ static int is_ppc_only(const char *path) {
         for (k = 0; k < nf && 8 + 20 * k + 20 <= (unsigned)n; k++) {
             unsigned int ct = OSReadBigInt32(h, 8 + 20 * k);
             if (ct == 18) ppc = 1;
-            if (ct == 7 || ct == 0x01000007) x86 = 1;
+            if (ct == 0x01000007 || (ct == 7 && !no_i386())) x86 = 1;
         }
         return ppc && !x86;
     }

@@ -76,8 +76,16 @@ __attribute__((constructor)) static void oah_root_init(void) {
         /* Tools inside a bundle count too (Wireshark.app/Contents/Resources/bin/dumpcap-bin: our
            "[pathmap]" lines reached Wireshark as "Unknown message from dumpcap" and no interface was
            listed); only a bundle's own Contents/MacOS executables keep stderr. */
+        /* stderr redirected to a file by the user (tool 2> errors.txt) counts too; only Rosettus's own
+           log files (~/Library/Logs/Rosettus/..., where launchers send an app's output) keep them */
+        int user_stderr = 0;
+        if (!fstat(2, &es)) {
+            char sp[1024];
+            user_stderr = !S_ISREG(es.st_mode) ||
+                          (fcntl(2, F_GETPATH, sp) != -1 && !strstr(sp, "/Library/Logs/Rosettus/"));
+        }
         if (g && (!strstr(g, ".app/") || !strstr(g, ".app/Contents/MacOS/")) && !getenv("OAH_VERBOSE") && !getenv("OAH_TOOL_STDERR") && !getenv("OAH_AGENT") &&
-            !fstat(2, &es) && !S_ISREG(es.st_mode)) {
+            user_stderr) {
             const char *h = getenv("HOME"); char lp[1024]; FILE *f = 0; int fd, hfd;
             snprintf(lp, sizeof lp, "%s/Library/Logs/Rosettus/tools.log", h ? h : "/tmp");
             if ((fd = open(lp, O_WRONLY | O_APPEND | O_CREAT, 0644)) < 0) fd = open("/dev/null", O_WRONLY);

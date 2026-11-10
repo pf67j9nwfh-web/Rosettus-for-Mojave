@@ -39,7 +39,9 @@ MANIFEST="$HERE/../manifest.tsv.gz"; [ -f "$MANIFEST" ] || MANIFEST="$HERE/manif
 
 echo "Writing $OUT ..."
 ( cd "$WORK" && cp mismatch.txt missing.txt root/ 2>/dev/null; sw_vers > root/sl_version.txt
-  tar czf "$OUT" -C root . )
+  # UTF-8 locale: in the C locale (an ssh session, a .command) tar stored non-ASCII names (the
+  # Japanese and Chinese fonts) so that they came out mangled on extraction (tools/fix_names.py)
+  LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 tar czf "$OUT" -C root . )
 ls -lh "$OUT"
 echo
 echo "Done. Copy $(basename "$OUT") to your Mojave Mac and run:"
