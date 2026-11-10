@@ -47,6 +47,14 @@ cp -R "$R/bin/Rosettus Launcher.app" "$W/root/Applications/"
 /usr/libexec/PlistBuddy -c "Add :RosettusRoot string /Library/Rosettus" "$W/root/Applications/Rosettus Launcher.app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $V" "$W/root/Applications/Rosettus Launcher.app/Contents/Info.plist"   # the release shows in Get Info / About
 codesign -f -s - "$W/root/Applications/Rosettus Launcher.app" 2>/dev/null || true
+# Rosettus Preference Pane Viewer: in /Applications as well (install.sh puts it there; the package
+# runs install.sh with --no-apps, so it has to be in the payload)
+if [ -d "$R/bin/Rosettus Preference Pane Viewer.app" ]; then
+  cp -R "$R/bin/Rosettus Preference Pane Viewer.app" "$W/root/Applications/"
+  /usr/libexec/PlistBuddy -c "Delete :RosettusRoot" "$W/root/Applications/Rosettus Preference Pane Viewer.app/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :RosettusRoot string /Library/Rosettus" "$W/root/Applications/Rosettus Preference Pane Viewer.app/Contents/Info.plist"
+  codesign -f -s - "$W/root/Applications/Rosettus Preference Pane Viewer.app" 2>/dev/null || true
+fi
 
 cat > "$W/scripts/postinstall" <<'EOF'
 #!/bin/bash
@@ -73,6 +81,18 @@ else
   st=0
 fi
 chown -R root:admin "/Applications/Rosettus Launcher.app"; chmod -R go-w "/Applications/Rosettus Launcher.app"
+PV="/Applications/Rosettus Preference Pane Viewer.app"
+if [ -d "$PV" ]; then
+  # this Mac's System Preferences icon for the viewer and the pane host (Apple artwork is not shipped)
+  icon="/Applications/System Preferences.app/Contents/Resources/PrefApp.icns"
+  if [ -f "$icon" ]; then
+    for app in "$PV" "/Library/Rosettus/prefpanes/Rosettus Preference Pane Host.app"; do
+      [ -d "$app" ] && mkdir -p "$app/Contents/Resources" && cp "$icon" "$app/Contents/Resources/AppIcon.icns"
+    done
+    codesign -f -s - "$PV" 2>/dev/null
+  fi
+  chown -R root:admin "$PV"; chmod -R go-w "$PV"
+fi
 echo "postinstall exit $st"
 exit $st
 EOF

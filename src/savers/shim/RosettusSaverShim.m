@@ -19,11 +19,15 @@
 @interface SHIM_CLASS : ScreenSaverView
 @property pid_t host;
 @property (copy) NSString *saverName;
+@property (copy) NSString *token;            /* sandboxed: this view's request to the saver agent */
 @end
 
 @implementation SHIM_CLASS
 
 - (NSBundle *)myBundle { return [NSBundle bundleForClass:[self class]]; }
+// Catalina's legacyScreenSaver reports isPreview YES for the full-screen view too: a preview is
+// the small one in System Preferences.
+- (BOOL)isSmallPreview { return self.isPreview && (self.bounds.size.width < 600 || self.bounds.size.height < 400); }
 
 - (instancetype)initWithFrame:(NSRect)frame isPreview:(BOOL)isPreview {
     if ((self = [super initWithFrame:frame isPreview:isPreview])) {
@@ -36,7 +40,7 @@
 }
 
 - (void)startHost {
-    if (self.host > 0 || self.isPreview) return;
+    if (self.host != 0 || [self isSmallPreview]) return;
     NSBundle *me = [self myBundle];
     NSString *root = [me objectForInfoDictionaryKey:@"RosettusRoot"];
     NSString *orig = [me pathForResource:@"Original" ofType:@"saver"];
@@ -44,10 +48,27 @@
     if (!root || !orig) return;
     // this view's area in global (bottom-left origin) coordinates
     NSRect r = [self.window convertRectToScreen:[self convertRect:self.bounds toView:nil]];
-    NSArray *args = @[ [root stringByAppendingPathComponent:@"rosetta"], hostApp, orig,
+    // the runner is "rosettus" (it was "rosetta" in early builds; a link of that name may remain)
+    NSString *runner = [root stringByAppendingPathComponent:@"rosettus"];
+    if (![[NSFileManager defaultManager] isExecutableFileAtPath:runner]) runner = [root stringByAppendingPathComponent:@"rosetta"];
+    NSArray *args = @[ runner, hostApp, orig,
                        [NSString stringWithFormat:@"%g", r.origin.x], [NSString stringWithFormat:@"%g", r.origin.y],
                        [NSString stringWithFormat:@"%g", r.size.width], [NSString stringWithFormat:@"%g", r.size.height],
                        [NSString stringWithFormat:@"%ld", (long)self.window.level] ];
+    if (getenv("APP_SANDBOX_CONTAINER_ID")) {
+        // Catalina runs third-party savers in a sandboxed process (legacyScreenSaver): a program
+        // started from here would be sandboxed too and could not run the translator. Ask the
+        // Rosettus saver agent (ROOT/savers/saverhelper.py, a launch agent) to start the host; the
+        // arguments travel in the notification's object, separated by U+001F.
+        self.token = [NSString stringWithFormat:@"%d-%p", getpid(), (void *)self];
+        NSMutableArray *a = [NSMutableArray arrayWithObject:self.token];
+        [a addObjectsFromArray:args];
+        [[NSDistributedNotificationCenter defaultCenter] postNotificationName:@"com.rosettus.saver.start"
+            object:[a componentsJoinedByString:@"\x1f"] userInfo:nil deliverImmediately:YES];
+        NSLog(@"Rosettus saver: asked the agent to start %@", orig);
+        self.host = -1;
+        return;
+    }
     NSString *log = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/Rosettus/ScreenSaver.log"];
     [[NSFileManager defaultManager] createDirectoryAtPath:[log stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
     posix_spawn_file_actions_t fa; posix_spawnattr_t at;
@@ -67,6 +88,12 @@
 }
 
 - (void)stopHost {
+    if (self.host < 0) {
+        [[NSDistributedNotificationCenter defaultCenter] postNotificationName:@"com.rosettus.saver.stop"
+            object:self.token userInfo:nil deliverImmediately:YES];
+        self.host = 0;
+        return;
+    }
     if (self.host > 0) {
         killpg(self.host, SIGTERM);
         kill(self.host, SIGTERM);
@@ -75,15 +102,22 @@
     }
 }
 
-- (void)startAnimation { [super startAnimation]; [self startHost]; }
+- (void)startAnimation { [super startAnimation]; NSLog(@"Rosettus saver: startAnimation (preview %d)", (int)[self isSmallPreview]); [self startHost]; }
 - (void)stopAnimation { [self stopHost]; [super stopAnimation]; }
-- (void)viewDidMoveToWindow { if (!self.window) [self stopHost]; }
+- (void)viewDidMoveToWindow {
+    NSLog(@"Rosettus saver: view %@ window (%.0fx%.0f, preview %d)", self.window ? @"in a" : @"out of its",
+          self.bounds.size.width, self.bounds.size.height, (int)self.isPreview);
+    if (!self.window) [self stopHost];
+}
 - (void)dealloc { [self stopHost]; }
 
 - (void)drawRect:(NSRect)rect {
+    // Catalina's engine does not always call startAnimation for a saver's full-screen view (it
+    // drew it all the same): start the host from the first drawing too
+    if (self.host == 0 && ![self isSmallPreview] && self.window) [self startHost];
     [[NSColor blackColor] setFill];
     NSRectFill(self.bounds);
-    if (!self.isPreview) return;              // full screen: the PowerPC saver draws over us
+    if (![self isSmallPreview]) return;              // full screen: the PowerPC saver draws over us
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new];
     ps.alignment = NSTextAlignmentCenter;
     CGFloat fs = MAX(9, self.bounds.size.height / 12);
@@ -97,7 +131,7 @@
 }
 
 - (void)animateOneFrame {
-    if (!self.isPreview && self.host > 0) {    // restart the host if it ended early
+    if (![self isSmallPreview] && self.host > 0) {    // restart the host if it ended early (the agent does that itself)
         int st;
         if (waitpid(self.host, &st, WNOHANG) == self.host) { self.host = 0; [self startHost]; }
     }

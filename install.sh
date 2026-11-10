@@ -234,11 +234,21 @@ if [ $AGENTS = 1 ]; then
       u=$(stat -f %Su /dev/console); uid=$(id -u "$u" 2>/dev/null || echo)
       if [ -n "$uid" ] && [ "$uid" != 0 ]; then
         launchctl bootout "gui/$uid/$(basename "$t" .plist)" 2>/dev/null || true
+        # bootout returns before a running job has ended; bootstrapping it again then fails
+        # (the translated fontd was left unloaded after an upgrade: no font server for PowerPC apps)
+        for i in $(seq 1 100); do launchctl print "gui/$uid/$(basename "$t" .plist)" >/dev/null 2>&1 || break; sleep 0.1; done
         h=$(dscl . -read "/Users/$u" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
         [ -n "$h" ] && rm -f "$h/Library/LaunchAgents/$(basename "$t")"
       fi
       mv -f "$a.new" "$a"
-      [ -n "$uid" ] && [ "$uid" != 0 ] && launchctl bootstrap "gui/$uid" "$a" 2>/dev/null || true
+      if [ -n "$uid" ] && [ "$uid" != 0 ]; then
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          launchctl bootstrap "gui/$uid" "$a" 2>/dev/null
+          launchctl print "gui/$uid/$(basename "$t" .plist)" >/dev/null 2>&1 && break
+          sleep 0.5
+        done
+        launchctl print "gui/$uid/$(basename "$t" .plist)" >/dev/null 2>&1 || say "Could not load $(basename "$t" .plist); it is loaded at the next login."
+      fi
     else
       launchctl unload "$a" 2>/dev/null || true
       mv -f "$a.new" "$a"
