@@ -109,6 +109,13 @@ Known gaps:
 
 ## Test results for Rosettus for Mojave 1.1
 
+* Menu bar apps (four PowerPC test apps built on Snow Leopard, `tests/ppc/menubar`): an app with a
+  Dock icon and a status item, a menu-bar-only app (LSUIElement), and one that counts in its item's
+  title every 2 s, rebuilds its menu each time it opens and moves itself into and out of the Dock
+  (TransformProcessType). All three items show side by side; each menu opens under its item; Say
+  Hello, Open Window and Quit work; Show in Dock gives a Dock icon, Hide from Dock removes it and
+  the item stays. When one of these apps quits (from its menu, or killed), the other items move right to close the gap and their menus still open under them; after Show in Dock the app's own menus take over the menu bar and open. A fourth test app has a picture item: a black template glyph with a white highlighted version, a colour icon, and icon with title; each shows, highlights while its menu is open and resizes correctly, also in Dark Mode. The same on Rosettus for Catalina.
+
 The full app test was run again on the 1.1 library (shared install, apps opened through their
 launchers in `/Applications/Rosettus`), with the same steps as for 1.0 below. Every app passed the
 same steps as with 1.0: AppleWorks 6, TextWrangler, Hex Fiend, Office 2004 (Word 10/10, Excel 10/10,

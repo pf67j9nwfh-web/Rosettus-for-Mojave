@@ -63,3 +63,5 @@ Verified on Mojave:
 - Null-check regression completes 30,000 iterations with exactly 10,000 caught exceptions; the focused twelve-operation test passes.
 
 No reboot or authenticated project check-in/check-out was tested. Interpreter mode affects performance. Treat important workspaces as experimental until those workflows have been validated with backups.
+
+**"Unable to start database."** A database process left over from an earlier run (for example after a forced quit) still holds the workspace. Quit the leftover `mysqld` in Activity Monitor (or stop the service with `versioncue stop`) and start Version Cue again.

@@ -1958,7 +1958,65 @@ static void oah_fixret_setkeeper(unsigned int *R, unsigned int ref) {
 }
 static int g_aen_evh_idx = -1;                   /* the RosettusAEHandler hook (oah_aen.h) */
 static void oah_fix_aen_evh(unsigned int *R);
+/* TransformProcessType from the guest: a menu bar app (LSUIElement) that puts itself in the Dock
+   (kProcessTransformToForegroundApplication, 1) or takes itself out again (...ToUIElementApplication,
+   4). The guest's Process Manager answered -600 (procNotFound); the host's transforms this process.
+   Other processes' serial numbers are left to the guest. OAH_NO_TRANSFORMFIX=1 disables. */
+/* HIToolbox caches the process kind on first use (GetProcessState: 1 foreground, 2 background only,
+   3 UI element) and never looks again, so after the transform it still took the app for a
+   background one: SetMenuBarObscured(false) returned at once and the menu bar was never registered
+   or drawn. The cache byte is found from the function's own code (bcl 20,31 / mflr r31 ...
+   addis r29,r31,hi / lbz r0,lo(r29)) and set to the new kind; back into a UI element, the kind
+   seen at launch is put back. */
+static void oah_fix_transform_state(unsigned int type) {
+    static unsigned int fn, slot;
+    static int orig = -1;
+    if (!fn) {
+        unsigned int i, w, hi = 0, base, rt = 0;
+        fn = oah_guest_sym("HIToolbox", "__ZL15GetProcessStatev");
+        if (!fn) fn = 1;
+        for (i = 0; fn > 1 && i < 16; i++) {
+            w = OSSwapBigToHostInt32(((unsigned int *)fn)[i]);
+            if (w == 0x429f0005) rt = fn + 4 * i + 4;                       /* bcl 20,31,.+4: r31 = next */
+            else if ((w & 0xfc1f0000) == 0x3c1f0000 && (w >> 21 & 31) == 29) hi = w << 16;  /* addis r29,r31,hi */
+            else if ((w & 0xffff0000) == 0x881d0000 && rt && hi) {           /* lbz r0,lo(r29) */
+                base = rt + hi;
+                slot = base + (unsigned int)(int)(short)(w & 0xffff);
+                break;
+            }
+        }
+        fprintf(stderr, "[bridge/gen] HIToolbox process-kind cache %s (0x%08x)\n", slot ? "found" : "not found", slot);
+    }
+    if (!slot || getenv("OAH_NO_TRANSFORMSTATE")) return;
+    if (orig < 0) orig = *(unsigned char *)slot;
+    *(unsigned char *)slot = type == 1 ? 1 : (unsigned char)(orig ? orig : 3);
+}
+static void oah_fix_transform(unsigned int *R) {
+    static int (*tpt)(void *, unsigned int), (*gcp)(void *);
+    struct { unsigned int hi, lo; } cur = { 0, 2 }, me = { 0, 0 };
+    unsigned int hi, lo;
+    if (!R[3]) return;
+    hi = OSSwapBigToHostInt32(*(unsigned int *)R[3]); lo = OSSwapBigToHostInt32(*(unsigned int *)(R[3] + 4));
+    if (!tpt) { *(void **)&tpt = dlsym(RTLD_DEFAULT, "TransformProcessType"); *(void **)&gcp = dlsym(RTLD_DEFAULT, "GetCurrentProcess"); }
+    if (!tpt) return;
+    if (!(hi == 0 && lo == 2) && !(gcp && gcp(&me) == 0 && me.hi == hi && me.lo == lo)) return;
+    g_gt_skip = 1;
+    if (R[4] == 1) oah_mb_note_front();
+    g_gt_skip_ret = (unsigned int)tpt(&cur, R[4]);
+    fprintf(stderr, "[bridge/gen] guest TransformProcessType(%u) -> %d\n", R[4], (int)g_gt_skip_ret);
+    /* Into the Dock: the app was active already (a UI element in front), so the activation that
+       follows was dropped as "already in that state", and HIToolbox's activation handler
+       (HIApplication::HandleActivated), which puts up the app's menu bar, never ran: the previous
+       app's menus stayed in the bar. A forced activation runs it. OAH_NO_TRANSFORMMENUBAR=1: not done. */
+    if (!g_gt_skip_ret && (R[4] == 1 || R[4] == 4)) oah_fix_transform_state(R[4]);
+    if (!g_gt_skip_ret && R[4] == 1 && !getenv("OAH_NO_TRANSFORMMENUBAR")) {
+        oah_cgs_force_activation();
+        oah_cgs_mb_adopt_scan();
+    }
+}
+static int oah_want_transformfix(void) { return !getenv("OAH_NO_TRANSFORMFIX"); }
 static const struct { const char *lib, *sym; void (*fix)(unsigned int *); void (*fixret)(unsigned int *, unsigned int); int (*want)(void); int follow; } g_gt_fixes[] = {
+    { "HIServices", "_TransformProcessType", oah_fix_transform, 0, oah_want_transformfix },
     { "libSystem.B.dylib", "_NSIsSymbolNameDefined", oah_fix_alc_defined, 0, oah_alc_want },
     { "libSystem.B.dylib", "_NSLookupAndBindSymbol", oah_fix_alc_lookup, 0, oah_alc_want },
     { "libSystem.B.dylib", "_NSAddressOfSymbol", oah_fix_alc_address, 0, oah_alc_want },

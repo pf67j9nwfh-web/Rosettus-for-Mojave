@@ -251,6 +251,11 @@ typedef struct {
     unsigned int dnd_wid;           /* the window id CoreDrag handlers were installed for (oah_dnd.h) */
     double pmt;
 } oah_cgswin_t;
+static unsigned int oah_cgs_sb_hit(double x, double y);   /* status items (below) */
+static int oah_cgs_sb_is(unsigned int wid);
+static void oah_cgs_sb_layout(unsigned int wid, float neww);
+static int oah_sb_off(void);
+static unsigned int g_sb_n;
 /* Retina windows (OAH_HIDPI=1 on a 2x display): the window's store has twice the pixels in each
    direction and the guest's CoreGraphics context over it starts with a 2x transform, so text and
    paths drawn through CG are rendered at full resolution; the native window gets resolution 2.
@@ -329,6 +334,7 @@ static void oah_app_hide(int hide) {
     for (i = 0; i < OAH_MAXWIN; i++) {
         oah_cgswin_t *w = &g_cgswin[i];
         if (!w->wid || w->wid == g_menubar_wid) continue;
+        if (!oah_sb_off() && oah_cgs_sb_is(w->wid)) continue;      /* a status item stays */
         if (hide && w->ordered && !w->app_hidden && !w->hod_hidden && !w->ghost) {
             p_CGSOrderWindow(g_ncid, w->wid, 0, 0);
             w->app_hidden = 1;
@@ -595,6 +601,33 @@ static void oah_mb_schedule(void) {
    would: the previous front app is made front without raising its windows (kCPSNoWindows),
    then this one (kCPSUserGenerated), and the bars are set again. OAH_MB_NOHANDOFF=1 skips it.
    Called from the bridge and event paths (main thread), at most every 250 ms. */
+#include <sys/sysctl.h>
+static int g_mb_handoff;                  /* hand the activation over now (menu bar adopted) */
+static unsigned int g_mb_hint[2];         /* front process before TransformProcessType */
+static void oah_mb_note_front(void) {     /* called before the guest's TransformProcessType */
+    int (*gf)(unsigned int *) = (int (*)(unsigned int *))dlsym(RTLD_DEFAULT, "SLPSGetFrontProcess");
+    int (*gc)(unsigned int *) = (int (*)(unsigned int *))dlsym(RTLD_DEFAULT, "SLPSGetCurrentProcess");
+    unsigned int f[2] = { 0, 0 }, me[2] = { 0, 0 };
+    if (gf && gc && !gf(f) && !gc(me) && f[1] && (f[0] != me[0] || f[1] != me[1])) { g_mb_hint[0] = f[0]; g_mb_hint[1] = f[1]; }
+}
+static void oah_mb_prev_guess(unsigned int *prev) {
+    int (*gpp)(int, unsigned int *);
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_UID, (int)getuid() };
+    size_t len = 0, i;
+    struct kinfo_proc *kp;
+    if (g_mb_hint[1]) { prev[0] = g_mb_hint[0]; prev[1] = g_mb_hint[1]; return; }
+    gpp = (int (*)(int, unsigned int *))dlsym(RTLD_DEFAULT, "GetProcessForPID");
+    if (!gpp || sysctl(mib, 4, 0, &len, 0, 0) || !len) return;
+    if (!(kp = (struct kinfo_proc *)malloc(len))) return;
+    if (!sysctl(mib, 4, kp, &len, 0, 0))
+        for (i = 0; i < len / sizeof *kp; i++)
+            if (!strcmp(kp[i].kp_proc.p_comm, "Finder")) {
+                unsigned int psn[2] = { 0, 0 };
+                if (!gpp(kp[i].kp_proc.p_pid, psn) && psn[1]) { prev[0] = psn[0]; prev[1] = psn[1]; }
+                break;
+            }
+    free(kp);
+}
 static void oah_mb_menu_closed(void);
 static void oah_mb_tick(int force) {
     /* Front process from the window server (CPS), not LaunchServices: launchservicesd waits on
@@ -655,12 +688,26 @@ static void oah_mb_tick(int force) {
     oah_ae_checkin();
     now = f[0] == self[0] && f[1] == self[1];
     if (!now && f[1]) { prev[0] = f[0]; prev[1] = f[1]; }   /* remember who was front */
-    if (now && !was && t >= quiet_until) {
+    if (now && g_mb_handoff && !prev[1]) oah_mb_prev_guess(prev);
+    if (now && (!was || g_mb_handoff) && t >= quiet_until) {
         int e1 = -1, e2 = -1;
+        int adopted = g_mb_handoff;
+        g_mb_handoff = 0;
         if (!getenv("OAH_MB_NOHANDOFF") && slps && prev[1]) {
             e1 = slps(prev, 0, 0x400 /* kCPSNoWindows */);
             e2 = slps(self, 0, 0x200 /* kCPSUserGenerated */);
             quiet_until = t + 1.5;                         /* our own hand-off is not a new switch */
+        }
+        if (adopted && !getenv("OAH_NO_ADOPTDRAW")) {
+            /* Now that this process owns the bar, have HIToolbox put it up the way an activation does
+               (HandleActivated -> SetMenuBarObscured(false) -> RegisterMenuBar, which draws it). At
+               launch the UI element got there already, so the "not obscured" state is cached: obscure
+               the bar first. */
+            static unsigned int smo;
+            unsigned int a0[1];
+            if (!smo) smo = oah_guest_sym("HIToolbox", "_SetMenuBarObscured");
+            if (smo) { a0[0] = 1; oah_callppc_n("SetMenuBarObscured", smo, 1, a0); a0[0] = 0; oah_callppc_n("SetMenuBarObscured", smo, 1, a0); }
+            CGSLOG("[cgs] adopted menu bar: guest SetMenuBarObscured %s\n", smo ? "called" : "not found");
         }
         oah_mb_publish();
         oah_mb_schedule();
@@ -1384,6 +1431,34 @@ static void oah_cgs_blit(oah_cgswin_t *w) {
     if (w->wid && w->store) oah_cgs_blit_unl(w);     /* released while we waited: nothing to do */
     oah_blit_unlock();
 }
+/* Dark Mode (AppleInterfaceStyle = Dark in the global domain), looked up at most every 2 s */
+static int oah_dark_mode(void) {
+    static int dark = -1; static double at;
+    double now = CFAbsoluteTimeGetCurrent();
+    if (dark < 0 || now - at > 2.0) {
+        CFPropertyListRef v;
+        CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        v = CFPreferencesCopyValue(CFSTR("AppleInterfaceStyle"), kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        dark = v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringCompare((CFStringRef)v, CFSTR("Dark"), kCFCompareCaseInsensitive) == 0;
+        if (v) CFRelease(v);
+        at = now;
+    }
+    return dark;
+}
+/* premultiplied ARGB (big endian): dark grey pixels get the inverse grey, so black text is white */
+static void oah_sb_lighten(unsigned char *px, int w, int h, size_t rb) {
+    int x, y;
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+        unsigned char *p = px + (size_t)y * rb + (size_t)x * 4;
+        int a = p[0], r = p[1], g = p[2], b = p[3], mx, mn, av;
+        if (!a) continue;
+        mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        av = (r + g + b) / 3;
+        if (mx - mn > 24 || av * 10 >= a * 6) continue;      /* coloured, or already light */
+        p[1] = p[2] = p[3] = (unsigned char)(a - av);
+    }
+}
 static void oah_cgs_blit_unl(oah_cgswin_t *w) {
     NCGS(void *, CGWindowContextCreate, (unsigned int, unsigned int, void *));
     NCGS(void *, CGColorSpaceCreateDeviceRGB, (void));
@@ -1399,6 +1474,7 @@ static void oah_cgs_blit_unl(oah_cgswin_t *w) {
     size_t wrb = (size_t)WRB(w);
     void *dp, *img;
     oah_rect_t r;
+    unsigned char *sbxf = 0;          /* a status item's pixels made light for a dark menu bar */
     if (iw <= 0 || ih <= 0 || !p_CGImageCreate) return;
     if (w->wid == g_menubar_wid && oah_mb_enabled()) { oah_mb_render(w); return; }
     if (sc > 1 && w->qd) oah_qd_push(w);
@@ -1478,7 +1554,12 @@ static void oah_cgs_blit_unl(oah_cgswin_t *w) {
             }
         }
         if (sc > 1) { y0 &= ~1; y1 = (y1 + 1) & ~1; if (y1 > ih) y1 = ih; }   /* whole points */
-        dp = p_CGDataProviderCreateWithData(0, bits + (size_t)y0 * wrb, (size_t)(y1 - y0) * wrb, 0);
+        if (g_sb_n && !oah_sb_off() && oah_cgs_sb_is(w->wid) && oah_dark_mode() && !getenv("OAH_NO_SBDARK") &&
+            (sbxf = (unsigned char *)malloc((size_t)(y1 - y0) * wrb))) {
+            memcpy(sbxf, bits + (size_t)y0 * wrb, (size_t)(y1 - y0) * wrb);
+            oah_sb_lighten(sbxf, iw, y1 - y0, wrb);
+        }
+        dp = p_CGDataProviderCreateWithData(0, sbxf ? sbxf : bits + (size_t)y0 * wrb, (size_t)(y1 - y0) * wrb, 0);
         /* 0x4000 = kCGBitmapByteOrder32Big; 2 = PremultipliedFirst, 6 = NoneSkipFirst */
         img = p_CGImageCreate(iw, y1 - y0, 8, 32, wrb, cs, 0x4000 | (w->opaque ? 6 : 2), dp, 0, 0, 0);
         /* window context: bottom-left origin, in points */
@@ -1504,6 +1585,7 @@ static void oah_cgs_blit_unl(oah_cgswin_t *w) {
     }
     p_CGImageRelease(img);
     p_CGDataProviderRelease(dp);
+    free(sbxf);
     w->blit_t = CFAbsoluteTimeGetCurrent();
     w->shex_rows++;
     if (w->pmv) oah_cgs_reveal(w);
@@ -3014,8 +3096,12 @@ static unsigned int oah_ev_to_guest(void *e) {
         wid = (unsigned int)p_CGEventGetIntegerValueField(e, 91);          /* window under the pointer */
         if (!oah_cgs_win(wid)) wid = (unsigned int)p_CGEventGetIntegerValueField(e, 51);
     } else wid = (unsigned int)p_CGEventGetIntegerValueField(e, 51);
-    if (fl == mouse_f && g_menubar_wid && oah_mb_enabled() && g_mb_published && p.y >= 0 && p.y < 22 &&
-        (type == 1 || type == 2 || type == 3 || type == 4 || type == 6 || type == 7)) wid = g_menubar_wid;
+    {   /* a click on one of our status items goes to its window, not to our menu bar's */
+        unsigned int sb = (fl == mouse_f && p.y >= 0 && p.y < 22 && !oah_sb_off()) ? oah_cgs_sb_hit(p.x, p.y) : 0;
+        if (sb) wid = sb;
+        else if (fl == mouse_f && g_menubar_wid && oah_mb_enabled() && g_mb_published && p.y >= 0 && p.y < 22 &&
+            (type == 1 || type == 2 || type == 3 || type == 4 || type == 6 || type == 7)) wid = g_menubar_wid;
+    }
     if (fl == mouse_f && g_menubar_wid && oah_mb_enabled() && g_mb_published &&
         ((type == 1 && wid == g_menubar_wid) || ((type == 5 || type == 6) && g_mb_tracking))) oah_mb_track(type, p.x, p.y);
     w = oah_cgs_win(wid);
@@ -3332,7 +3418,316 @@ static void oah_ls_set_uimode(unsigned int mode, unsigned int opts) {
 static unsigned long g_cgs_flush_skipped;   /* empty flushes skipped (see CGSFlushWindowContentRegion) */
 static int g_flushlog_v = -1;               /* OAH_FLUSHLOG=1: one line per window flush (time, thread, region) */
 #define g_flushlog (g_flushlog_v < 0 ? (g_flushlog_v = getenv("OAH_FLUSHLOG") ? 1 : 0) : g_flushlog_v)
+/* Status items (NSStatusItem: menu bar apps). Snow Leopard's AppKit makes a small window for each
+   item, registers it with CGSRegisterWindowWithSystemStatusBar(cid, wid, priority), calls
+   CGSAdjustSystemStatusBarWindows(cid), reads the window's place back (CGSGetWindowBounds) and
+   sets its frame. These calls were stubs, so the window stayed where AppKit made it (x = -width,
+   above the screen) and no item showed in the menu bar.
+   Mojave's window server (Catalina runs Mojave's i386 libraries) only computes an item's place
+   and leaves moving and ordering the window to the app. So we lay the items out ourselves at the
+   left of the other apps' items and menu extras, in the order they were registered, and keep each
+   one's right edge when AppKit resizes it (a changing title); the server is told about them too
+   (SLSSystemStatusBarRegisterWindow with the main display's UUID). AppKit orders the windows in
+   itself when CGSServerOperationState(16) answers 1 (liboah_mojave.c). Clicks in the menu bar
+   over one of our items go to its window, not to our menu bar's.
+   OAH_NO_STATUSBAR=1: the old stubs. OAH_STATUSBAR_LOG=1 logs. */
+#define OAH_SB_MAX 64
+static unsigned int g_sb_win[OAH_SB_MAX];
+static float g_sb_right[OAH_SB_MAX];      /* each item's right edge once laid out (0: not yet) */
+static int oah_sb_off(void) { static int v = -1; if (v < 0) v = getenv("OAH_NO_STATUSBAR") != 0; return v; }
+static int oah_sb_log(void) { static int v = -1; if (v < 0) v = getenv("OAH_STATUSBAR_LOG") || getenv("OAH_VERBOSE"); return v; }
+static int oah_cgs_sb_is(unsigned int wid) {
+    unsigned int k;
+    for (k = 0; k < g_sb_n; k++) if (g_sb_win[k] == wid) return 1;
+    return 0;
+}
+static unsigned int oah_cgs_sb_hit(double x, double y) {
+    unsigned int k;
+    for (k = 0; k < g_sb_n; k++) {
+        oah_cgswin_t *w = oah_cgs_win(g_sb_win[k]);
+        if (w && w->ordered && x >= w->x && y >= w->y && x < w->x + w->w && y < w->y + w->h) return w->wid;
+    }
+    return 0;
+}
+/* the left edge of the other apps' status items and menu extras: on-screen level-25 windows
+   (kCGStatusWindowLevel) in the menu bar, not ours, in the right part of the main display */
+static float oah_cgs_sb_left_edge(void) {
+    static CFArrayRef (*wl)(unsigned int, unsigned int);
+    static bool (*mkrect)(CFDictionaryRef, oah_rect_t *);
+    static CFStringRef kb, kl, kp;
+    static oah_rect_t (*db)(unsigned int);
+    static unsigned int (*mainid)(void);
+    float left, sw = 1440;
+    CFArrayRef a;
+    long i, n;
+    if (!wl) {
+        *(void **)&wl = dlsym(RTLD_DEFAULT, "CGWindowListCopyWindowInfo");
+        *(void **)&mkrect = dlsym(RTLD_DEFAULT, "CGRectMakeWithDictionaryRepresentation");
+        *(void **)&db = dlsym(RTLD_DEFAULT, "CGDisplayBounds");
+        *(void **)&mainid = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
+        { CFStringRef *q = (CFStringRef *)dlsym(RTLD_DEFAULT, "kCGWindowBounds"); kb = q ? *q : 0; }
+        { CFStringRef *q = (CFStringRef *)dlsym(RTLD_DEFAULT, "kCGWindowLayer"); kl = q ? *q : 0; }
+        { CFStringRef *q = (CFStringRef *)dlsym(RTLD_DEFAULT, "kCGWindowOwnerPID"); kp = q ? *q : 0; }
+    }
+    if (db && mainid) sw = db(mainid()).w;
+    left = sw - 120;                         /* none found: leave room for the clock */
+    if (!wl || !mkrect || !kb || !kl || !kp) return left;
+    a = wl(1 /* on screen only */, 0);
+    n = a ? CFArrayGetCount(a) : 0;
+    for (i = 0; i < n; i++) {
+        CFDictionaryRef dd = (CFDictionaryRef)CFArrayGetValueAtIndex(a, i);
+        CFNumberRef ln = (CFNumberRef)CFDictionaryGetValue(dd, kl), pn = (CFNumberRef)CFDictionaryGetValue(dd, kp);
+        CFDictionaryRef bd = (CFDictionaryRef)CFDictionaryGetValue(dd, kb);
+        int lev = 0, pid = 0;
+        oah_rect_t r;
+        if (!ln || !pn || !bd) continue;
+        CFNumberGetValue(ln, kCFNumberIntType, &lev);
+        CFNumberGetValue(pn, kCFNumberIntType, &pid);
+        if (lev != 25 || pid == getpid() || !mkrect(bd, &r)) continue;
+        if (r.y != 0 || r.h > 30 || r.w <= 0 || r.x < sw / 3) continue;
+        if (r.x < left) left = r.x;
+    }
+    if (a) CFRelease(a);
+    return left;
+}
+/* bounds of one window from CGWindowList (kCGWindowBounds); 0 if it has none */
+static int oah_cgs_wl_bounds(unsigned int wid, oah_rect_t *r) {
+    static CFArrayRef (*desc)(CFArrayRef);
+    static bool (*mkrect)(CFDictionaryRef, oah_rect_t *);
+    static CFStringRef kb;
+    const void *v = (const void *)(uintptr_t)wid;
+    CFArrayRef in, out;
+    int ok = 0;
+    if (!desc) {
+        *(void **)&desc = dlsym(RTLD_DEFAULT, "CGWindowListCreateDescriptionFromArray");
+        *(void **)&mkrect = dlsym(RTLD_DEFAULT, "CGRectMakeWithDictionaryRepresentation");
+        { CFStringRef *q = (CFStringRef *)dlsym(RTLD_DEFAULT, "kCGWindowBounds"); kb = q ? *q : 0; }
+    }
+    if (!desc || !mkrect || !kb) return 0;
+    in = CFArrayCreate(0, &v, 1, 0);
+    out = in ? desc(in) : 0;
+    if (out && CFArrayGetCount(out) > 0) {
+        CFDictionaryRef dct = (CFDictionaryRef)CFArrayGetValueAtIndex(out, 0);
+        CFDictionaryRef bd = dct ? (CFDictionaryRef)CFDictionaryGetValue(dct, kb) : 0;
+        if (bd && mkrect(bd, r)) ok = 1;
+    }
+    if (out) CFRelease(out);
+    if (in) CFRelease(in);
+    return ok;
+}
+/* AppKit learns of a move it did not make from an AppKit-defined "window moved" event (subtype 4,
+   NSWindowMovedEventType): -[NSWindow _windowMoved:] reads the window's bounds (our record) back
+   and sets its frame, which the item's button tracking and its menu's position use */
+static void oah_cgs_sb_notify(unsigned int wid) {
+    NCGS(void *, CGEventCreate, (void *));
+    NCGS(void, CGEventSetType, (void *, int));
+    NCGS(void, CGEventSetIntegerValueField, (void *, int, long long));
+    void *ev = p_CGEventCreate ? p_CGEventCreate(0) : 0;
+    if (!ev) return;
+    p_CGEventSetType(ev, 13);
+    p_CGEventSetIntegerValueField(ev, 99, 4);
+    p_CGEventSetIntegerValueField(ev, 51, wid);
+    pthread_mutex_lock(&g_evq_mu);
+    oah_ev_enqueue_locked(ev);
+    oah_ev_wake_locked();
+    pthread_mutex_unlock(&g_evq_mu);
+}
+static pthread_mutex_t g_sb_mu = PTHREAD_MUTEX_INITIALIZER;
+/* place our items right to left from g_sb_right[0]; wid (if not 0) is about to get width neww.
+   Moves the native windows and our records; AppKit reads the places back with CGSGetWindowBounds
+   after its own calls, and gets a window-moved event for moves it did not ask for (notify). */
+static void oah_cgs_sb_layout_unl(unsigned int wid, float neww, int notify) {
+    NCGS(int, CGSMoveWindow, (unsigned int, unsigned int, const oah_pt_t *));
+    float right = -1;
+    unsigned int k;
+    for (k = 0; k < g_sb_n; k++) {
+        oah_cgswin_t *w = oah_cgs_win(g_sb_win[k]);
+        float ww;
+        oah_pt_t pt;
+        if (!w) continue;
+        ww = g_sb_win[k] == wid ? neww : w->w;
+        if (ww <= 0) continue;                         /* no size yet */
+        if (right < 0) right = g_sb_right[0] > 0 ? g_sb_right[0] : oah_cgs_sb_left_edge();
+        if (k == 0) g_sb_right[0] = right;
+        g_sb_right[k] = right;
+        pt.x = right - ww; pt.y = 0;
+        if (w->x != pt.x || w->y != pt.y) {
+            if (p_CGSMoveWindow) p_CGSMoveWindow(oah_cgs_cid(), w->wid, &pt);
+            if (oah_sb_log()) fprintf(stderr, "[statusbar] window %u to %.0f,%.0f (%.0f wide, was %.0f,%.0f)%s\n", w->wid, pt.x, pt.y, ww, w->x, w->y, notify ? " (watch)" : "");
+            w->x = pt.x; w->y = pt.y;
+            if (notify && w->ordered) oah_cgs_sb_notify(w->wid);
+        }
+        right = pt.x;
+    }
+}
+static void oah_cgs_sb_layout(unsigned int wid, float neww) {
+    pthread_mutex_lock(&g_sb_mu);
+    oah_cgs_sb_layout_unl(wid, neww, 0);
+    pthread_mutex_unlock(&g_sb_mu);
+}
+/* Every 0.5 s while we have items: (1) a window the server moved (Mojave's does, when the bar
+   changes) is taken where it went, and AppKit told; (2) the items keep to the left edge of the
+   items to their right: when one of those goes away (another app quits), ours move right to close
+   the gap; when one comes to overlap ours, ours move left. OAH_NO_SBWATCH=1 disables. */
+static int g_sb_watch;
+static void *oah_cgs_sb_watch(void *arg) {
+    for (;;) {
+        unsigned int k;
+        usleep(500000);
+        if (!g_sb_n) continue;
+        pthread_mutex_lock(&g_sb_mu);
+        for (k = 0; k < g_sb_n; k++) {                 /* (1) the server's moves */
+            oah_cgswin_t *w = oah_cgs_win(g_sb_win[k]);
+            oah_rect_t nb;
+            if (!w || !w->ordered || w->w <= 0 || !oah_cgs_wl_bounds(w->wid, &nb) || nb.w <= 0) continue;
+            if (nb.y == 0 && nb.x >= 0 && fabsf(nb.x - w->x) > 0.5f) {
+                if (oah_sb_log()) fprintf(stderr, "[statusbar] window %u moved by the server to %.0f (was %.0f)\n", w->wid, nb.x, w->x);
+                if (k == 0) g_sb_right[0] = nb.x + w->w;
+                w->x = nb.x;
+                oah_cgs_sb_notify(w->wid);
+            }
+        }
+        {   /* (2) the left edge of the others' items to our right (or overlapping ours) */
+            float L = 1e9f, A = -1, sw = 1440;
+            CFArrayRef a = 0;
+            static CFArrayRef (*wl)(unsigned int, unsigned int);
+            static bool (*mkrect)(CFDictionaryRef, oah_rect_t *);
+            static CFStringRef kb, kl, kp;
+            static oah_rect_t (*db)(unsigned int);
+            static unsigned int (*mainid)(void);
+            long i, n;
+            if (!wl) {
+                *(void **)&wl = dlsym(RTLD_DEFAULT, "CGWindowListCopyWindowInfo");
+                *(void **)&mkrect = dlsym(RTLD_DEFAULT, "CGRectMakeWithDictionaryRepresentation");
+                *(void **)&db = dlsym(RTLD_DEFAULT, "CGDisplayBounds");
+                *(void **)&mainid = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
+                { CFStringRef *q = (CFStringRef *)dlsym(RTLD_DEFAULT, "kCGWindowBounds"); kb = q ? *q : 0; }
+                { CFStringRef *q = (CFStringRef *)dlsym(RTLD_DEFAULT, "kCGWindowLayer"); kl = q ? *q : 0; }
+                { CFStringRef *q = (CFStringRef *)dlsym(RTLD_DEFAULT, "kCGWindowOwnerPID"); kp = q ? *q : 0; }
+            }
+            if (db && mainid) sw = db(mainid()).w;
+            for (k = 0; k < g_sb_n; k++) {
+                oah_cgswin_t *w = oah_cgs_win(g_sb_win[k]);
+                if (w && w->ordered && w->w > 0 && w->x >= 0 && w->x < L) L = w->x;
+            }
+            if (L < 1e9f && g_sb_right[0] > 0 && wl && mkrect && kb && kl && kp && (a = wl(1, 0))) {
+                n = CFArrayGetCount(a);
+                for (i = 0; i < n; i++) {
+                    CFDictionaryRef dd = (CFDictionaryRef)CFArrayGetValueAtIndex(a, i);
+                    CFNumberRef ln = (CFNumberRef)CFDictionaryGetValue(dd, kl), pn = (CFNumberRef)CFDictionaryGetValue(dd, kp);
+                    CFDictionaryRef bd = (CFDictionaryRef)CFDictionaryGetValue(dd, kb);
+                    int lev = 0, pid = 0;
+                    oah_rect_t r;
+                    if (!ln || !pn || !bd) continue;
+                    CFNumberGetValue(ln, kCFNumberIntType, &lev);
+                    CFNumberGetValue(pn, kCFNumberIntType, &pid);
+                    if (lev != 25 || pid == getpid() || !mkrect(bd, &r)) continue;
+                    if (r.y != 0 || r.h > 30 || r.w <= 0 || r.x < sw / 3) continue;
+                    if (r.x + r.w / 2 > L && (A < 0 || r.x < A)) A = r.x;
+                }
+                CFRelease(a);
+                if (A < 0) A = sw - 120;
+                if (fabsf(A - g_sb_right[0]) > 0.5f) {
+                    if (oah_sb_log()) fprintf(stderr, "[statusbar] right edge %.0f -> %.0f (%s)\n", g_sb_right[0], A, A > g_sb_right[0] ? "gap" : "overlap");
+                    g_sb_right[0] = A;
+                    oah_cgs_sb_layout_unl(0, 0, 1);
+                }
+            }
+        }
+        pthread_mutex_unlock(&g_sb_mu);
+    }
+    return arg;
+}
+/* an app activation for the guest that passes the "already in that state" filter (0x7ff1) */
+static void oah_cgs_force_activation(void) {
+    NCGS(void *, CGEventCreate, (void *));
+    NCGS(void, CGEventSetType, (void *, int));
+    NCGS(void, CGEventSetIntegerValueField, (void *, int, long long));
+    void *e = p_CGEventCreate ? p_CGEventCreate(0) : 0;
+    if (!e) return;
+    p_CGEventSetType(e, 13);
+    p_CGEventSetIntegerValueField(e, 99, 0x7ff1);
+    pthread_mutex_lock(&g_evq_mu);
+    oah_ev_enqueue_locked(e);
+    oah_ev_wake_locked();
+    pthread_mutex_unlock(&g_evq_mu);
+}
+/* menu bar window of an app that moved into the Dock (see oah_fix_transform) */
+static int g_mb_adopt;
+static int oah_cgs_call(const char *n, unsigned int *R);
+static int oah_cgs_mb_is_bar(oah_cgswin_t *w) {
+    return w && w->wid && w->level == 24 && w->y < 1 && w->h >= 16 && w->h <= 24 && w->w >= g_cgs_desk.w - 1;
+}
+static void oah_cgs_mb_adopt(unsigned int wid) {
+    unsigned int R[16];
+    if (g_menubar_wid || getenv("OAH_NO_TRANSFORMMENUBAR")) return;
+    memset(R, 0, sizeof R);
+    R[3] = g_ncid; R[4] = wid;
+    CGSLOG("[cgs] app moved into the Dock: adopting menu bar window %u\n", wid);
+    oah_cgs_call("CGSRegisterMenuBarWindow", R);
+    if (g_menubar_wid == wid) g_mb_handoff = 1;
+}
+static void oah_cgs_mb_adopt_scan(void) {
+    int i;
+    g_mb_adopt = 1;
+    for (i = 0; i < OAH_MAXWIN; i++)
+        if (oah_cgs_mb_is_bar(&g_cgswin[i])) { oah_cgs_mb_adopt(g_cgswin[i].wid); break; }
+}
+static int oah_cgs_statusbar(const char *n, unsigned int *R) {
+    if (oah_sb_off()) return 0;
+    if (!strcmp(n, "CGSRegisterWindowWithSystemStatusBar")) {          /* (cid, wid, priority) */
+        NCGS(int, CGSSystemStatusBarRegisterWindow, (unsigned int, unsigned int, int, unsigned long long, const void *, int));
+        static CFStringRef disp;
+        unsigned int k;
+        if (!disp) {        /* the main display (the one with the menu bar) */
+            CFUUIDRef (*mk)(unsigned int); unsigned int (*mainid)(void);
+            *(void **)&mk = dlsym(RTLD_DEFAULT, "CGDisplayCreateUUIDFromDisplayID");
+            *(void **)&mainid = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
+            if (mk && mainid) { CFUUIDRef u = mk(mainid()); if (u) { disp = CFUUIDCreateString(0, u); CFRelease(u); } }
+        }
+        if (p_CGSSystemStatusBarRegisterWindow)       /* flags 1 as Mojave's AppKit passes (4: full screen) */
+            p_CGSSystemStatusBarRegisterWindow(oah_cgs_cid(), R[4], (int)R[5], 0, disp, 1);
+        for (k = 0; k < g_sb_n && g_sb_win[k] != R[4]; k++) ;
+        pthread_mutex_lock(&g_sb_mu);
+        if (k == g_sb_n && g_sb_n < OAH_SB_MAX) { g_sb_right[g_sb_n] = 0; g_sb_win[g_sb_n++] = R[4]; }
+        pthread_mutex_unlock(&g_sb_mu);
+        if (!g_sb_watch && !getenv("OAH_NO_SBWATCH")) {
+            pthread_t th;
+            g_sb_watch = 1;
+            if (!pthread_create(&th, 0, oah_cgs_sb_watch, 0)) pthread_detach(th);
+        }
+        if (oah_sb_log()) fprintf(stderr, "[statusbar] registered window %u (priority %d)\n", R[4], (int)R[5]);
+        R[3] = 0;
+        return 1;
+    }
+    if (!strcmp(n, "CGSUnregisterWindowWithSystemStatusBar")) {        /* (cid, wid) */
+        NCGS(int, CGSUnregisterWindowWithSystemStatusBar, (unsigned int, unsigned int));
+        unsigned int k, j;
+        pthread_mutex_lock(&g_sb_mu);
+        for (k = 0; k < g_sb_n; k++) if (g_sb_win[k] == R[4]) {
+            if (k == 0 && g_sb_n > 1) g_sb_right[1] = g_sb_right[0];      /* the next one takes its place */
+            for (j = k; j + 1 < g_sb_n; j++) { g_sb_win[j] = g_sb_win[j + 1]; g_sb_right[j] = g_sb_right[j + 1]; }
+            g_sb_n--;
+            break;
+        }
+        pthread_mutex_unlock(&g_sb_mu);
+        if (p_CGSUnregisterWindowWithSystemStatusBar) p_CGSUnregisterWindowWithSystemStatusBar(oah_cgs_cid(), R[4]);
+        if (oah_sb_log()) fprintf(stderr, "[statusbar] unregistered window %u\n", R[4]);
+        oah_cgs_sb_layout(0, 0);                       /* the others close the gap */
+        R[3] = 0;
+        return 1;
+    }
+    if (!strcmp(n, "CGSAdjustSystemStatusBarWindows")) {               /* (cid) */
+        NCGS(int, CGSAdjustSystemStatusBarWindows, (unsigned int));
+        if (p_CGSAdjustSystemStatusBarWindows) p_CGSAdjustSystemStatusBarWindows(oah_cgs_cid());
+        oah_cgs_sb_layout(0, 0);
+        R[3] = 0;
+        return 1;
+    }
+    return 0;
+}
 static int oah_cgs_call(const char *n, unsigned int *R) {
+    if (!strncmp(n, "CGS", 3) && strstr(n, "SystemStatusBar") && oah_cgs_statusbar(n, R)) return 1;
     double *F = (double *)((unsigned char *)R + 0x1e8);
     oah_cgswin_t *w;
     if (!oah_gtb()) return 0;
@@ -3765,6 +4160,7 @@ static int oah_cgs_call(const char *n, unsigned int *R) {
         CGSLOG("[cgs] levels for activation %u: active %d inactive %d -> %d\n", R[4], (int)R[5], (int)R[6], lv);
         if (w) oah_cgs_tags_note(w);
         R[3] = w && w->ghost ? 0 : p_CGSSetWindowLevel(g_ncid, R[4], lv);
+        if (g_mb_adopt && !g_menubar_wid && oah_cgs_mb_is_bar(w)) oah_cgs_mb_adopt(w->wid);
         return 1;
     }
     if (!strcmp(n, "CGSInputModifierKeyState")) {     /* (source?, modifier index) -> Boolean down */
@@ -4273,7 +4669,8 @@ static int oah_cgs_call(const char *n, unsigned int *R) {
             R[3] = 0;
             return 1;
         }
-        if (w && (w->hod_hidden || g_app_hidden) && (int)R[5] != 0) {   /* inactive / hidden: stays out for now */
+        if (w && (w->hod_hidden || g_app_hidden) && (int)R[5] != 0 &&
+            !(g_sb_n && !oah_sb_off() && (w->level >= 25 || oah_cgs_sb_is(w->wid)))) {   /* inactive / hidden: stays out for now */
             if (g_app_hidden) w->app_hidden = 1;
             w->ordered = 1;
             R[3] = 0; return 1;
@@ -4297,7 +4694,8 @@ static int oah_cgs_call(const char *n, unsigned int *R) {
            by making it the front window; no CGSOrderWindow follows. Order it in. */
         NCGS(int, CGSOrderWindow, (unsigned int, unsigned int, int, unsigned int));
         w = oah_cgs_win(R[4]);
-        if (w && !w->ordered && g_app_hidden && !getenv("OAH_NO_HIDDENFRONT")) {
+        if (w && !w->ordered && g_app_hidden && !getenv("OAH_NO_HIDDENFRONT") &&
+            !(g_sb_n && !oah_sb_off() && (w->level >= 25 || oah_cgs_sb_is(w->wid)))) {   /* (a status item's menu shows) */
             /* the app is hidden (Cmd-H): HIToolbox orders its windows out and then makes one the
                front window (Kid Pix's full-screen window came straight back on screen); keep it
                out until the app is shown again */
@@ -4487,6 +4885,13 @@ static int oah_cgs_call(const char *n, unsigned int *R) {
         /* under the blit lock: the event thread may be blitting this window with the context
            released below (InDesign's palettes slide out with a reshape per frame; SkyLight
            crashed in CGSWindowGetSize under CGContextDrawImage) */
+        if (!oah_sb_off() && oah_cgs_sb_is(R[4]) && b.w > 0) {
+            /* a status item: AppKit's origin for it is x = -width above the screen until it has read
+               the place back; keep its right edge in the menu bar as its width changes */
+            oah_cgswin_t *sw = oah_cgs_win(R[4]);
+            oah_cgs_sb_layout(R[4], b.w);
+            if (sw && sw->x >= 0) { F[1] = sw->x - b.x; F[2] = sw->y - b.y; }
+        }
         oah_blit_lock();
         R[3] = p_CGSSetWindowShape(g_ncid, R[4], (float)F[1], (float)F[2], nr);
         oah_cgs_nrelease(nr);

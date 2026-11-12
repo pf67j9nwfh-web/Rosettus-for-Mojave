@@ -1753,6 +1753,24 @@ static int oah_bt_word(unsigned int a, unsigned int *v) {
     *v = OSSwapBigToHostInt32(w);
     return 1;
 }
+/* Status items, the parts outside oah_cgs.h. CGSSetPreventsActivation(cid, wid, flag): AppKit sets
+   it on status item windows (a click opens the item's menu without activating the app); it was a
+   stub (OAH_NO_PREVACT=1). CGSServerOperationState(16): AppKit 10.6 asks it (with IsMenuBarVisible
+   and CGDisplayIsCaptured) whether the server orders status item windows in; answering 1 makes
+   AppKit order them itself, which Mojave's server leaves to the app (OAH_NO_STATUSBAR=1: 0). */
+static int oah_sb_misc_bridge(const char *nm, unsigned int *R) {
+    if (!strcmp(nm, "CGSSetPreventsActivation")) {
+        static int (*f)(int, int, int); static int off = -1;
+        if (off < 0) off = getenv("OAH_NO_PREVACT") != 0;
+        if (off) return 0;
+        if (!f) { *(void **)&f = dlsym(RTLD_DEFAULT, "SLSSetPreventsActivation"); if (!f) *(void **)&f = dlsym(RTLD_DEFAULT, "CGSSetPreventsActivation"); }
+        if (!f) return 0;
+        R[3] = (unsigned int)f((int)R[3], (int)R[4], (int)R[5]);
+        return 1;
+    }
+    if (!strcmp(nm, "CGSServerOperationState") && R[3] == 16 && !getenv("OAH_NO_STATUSBAR")) { R[3] = 1; return 1; }
+    return 0;
+}
 static void oah_gen_trace(oah_gen_t *g, unsigned int *R) {
     unsigned long c = ++g->calls;
     g_trace_total++;
@@ -1952,6 +1970,7 @@ static void oah_gen_call(unsigned int idx, unsigned int *R) {
     if (!strcmp(g->name, "CGDisplayBestModeForParametersAndRefreshRate")) { oah_cg_best_mode(R, 1); return; }
     if (!strcmp(g->name, "CGDisplaySwitchToMode")) { oah_cg_switch_mode(R); return; }
     if (!strcmp(g->name, "CGDisplayAvailableModes")) { oah_cg_display_modes(R, 1); return; }
+    if (g->sig[0] == 'T' && g->name[0] == 'C' && oah_sb_misc_bridge(g->name, R)) return;
     if (g->sig[0] == 'T') { oah_gen_trace(g, R); return; }
     memset(a, 0, sizeof a);
     if (!oah_gen_resolve(g)) { R[3] = 0xffffffffu; return; }

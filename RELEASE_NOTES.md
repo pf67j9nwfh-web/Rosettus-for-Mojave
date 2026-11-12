@@ -19,6 +19,12 @@ Two menu bar fixes, brought back from Rosettus for Catalina:
   see in Dark Mode but noticeable in Light Mode. The shadow is now turned off
   (`OAH_MB_SHADOW=1` brings it back).
 
+**PowerPC menu bar apps work.** Their status items now show in the menu bar (before, none showed),
+open their menus and run their commands: apps that are also in the Dock, menu-bar-only apps, and
+apps that change their item or move themselves into and out of the Dock while running. Hiding such
+an app leaves its item in the menu bar, and in Dark Mode the items' titles are drawn light.
+When one of these apps quits, the other PowerPC items move over to close the gap. Items drawn as pictures (a template glyph, a colour icon, or an icon with a title) work as well as text ones, and an app that puts itself in the Dock gets its own menus in the menu bar.
+
 Also in this release:
 
 * The launcher stub of patched apps (`rlaunch`) also recognizes an app already running under

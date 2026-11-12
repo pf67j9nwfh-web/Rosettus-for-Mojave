@@ -153,6 +153,14 @@ dumped on demand.
 | `OAH_CLIPTRACE=1` | log each clipboard import / export and the flavors seen |
 | `OAH_CLIP_OFFMAIN=1` | read and write the guest clipboard on the sync thread instead of the app's main thread |
 | `OAH_CLIP_PROMISED=1` | also export flavors the copying app only promised (normally left out: reading them runs the app's own provider inside the sync, and Hex Fiend's put up a modal window) |
+| `OAH_NO_STATUSBAR=1` | status items (menu bar apps) as before 1.1: not shown (the status bar calls are stubs again) |
+| `OAH_STATUSBAR_LOG=1` | log the status items' registration and placement |
+| `OAH_NO_SBDARK=1` | a status item's title is not made light in Dark Mode |
+| `OAH_NO_PREVACT=1` | `CGSSetPreventsActivation` stays a no-op |
+| `OAH_NO_TRANSFORMFIX=1` | the guest's `TransformProcessType` is left to its own Process Manager (which answers -600) |
+| `OAH_NO_SBWATCH=1` | our status items are not moved when other apps' items come or go (the gap a quitting app leaves stays) |
+| `OAH_NO_TRANSFORMMENUBAR=1` | after Show in Dock (TransformProcessType to foreground) the app's menu bar is not put up: the previous app's menus stay |
+| `OAH_NO_TRANSFORMSTATE=1` | HIToolbox's cached process kind is not updated by TransformProcessType |
 | `OAH_MB_PIXELS=1` | menu bar: publish the guest's own 1x title pixels instead of drawing the titles natively at Retina resolution |
 | `OAH_HIDPI=1` | experimental, off by default: give PowerPC windows a 2x backing store on Retina displays, so the guest renders text and Quartz drawing at 2x (QuickDraw stays 1x, pixel-doubled). The native window context stays 1x on Mojave, so each window also gets a CGS surface at resolution 2 drawn by a CGL context (backing size = the store's pixels): the 2x pixels reach the screen. Also switched on by Rosettus Launcher's File > Sharp Text on Retina Displays (com.rosettus Retina) |
 | `OAH_NO_CUIFRAME1X=1` | with `OAH_CUISCALE`: Carbon window frames are not drawn through a 1x bitmap (their title bar background is then missing at 2x) |
