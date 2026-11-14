@@ -74,6 +74,51 @@ static float g_snd_inpeak, g_snd_outpeak;
 static int g_snd_hdrlog;
 static unsigned long g_snd_renders;
 static void (*volatile g_snd_music_mix)(float *out, unsigned int n);
+/* Idle output. Once an app had made a sound, the output unit (Mojave) or the mixing thread feeding
+   the host ring (Catalina: 250 wake-ups a second) ran until the app quit, rendering silence.
+   After OAH_SND_IDLE_SECS (default 10; 0 = never) of silence with no channel holding queued
+   commands, no pending callbacks and no music stream, the output stops; the next Sound Manager
+   call starts it again (before its command is queued). */
+static volatile unsigned long g_snd_quiet;      /* frames of silence in a row */
+static volatile int g_snd_paused, g_snd_pause_req, g_snd_ring_mode;
+static pthread_mutex_t g_snd_run_mx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_snd_run_cv = PTHREAD_COND_INITIALIZER;
+static OSStatus (*g_snd_fstart)(AudioUnit), (*g_snd_fstop)(AudioUnit);
+static int oah_snd_tr(void);
+static unsigned long oah_snd_idle_frames(void) {
+    static long f = -1;
+    if (f < 0) { const char *e = getenv("OAH_SND_IDLE_SECS"); f = (long)((e ? atof(e) : 10.0) * OAH_SND_OUTRATE); if (f < 0) f = 0; }
+    return (unsigned long)f;
+}
+static void oah_snd_pause_fn(void *a) {         /* off the audio thread (output unit mode) */
+    (void)a;
+    pthread_mutex_lock(&g_snd_run_mx);
+    if (!g_snd_paused && oah_snd_idle_frames() && g_snd_quiet >= oah_snd_idle_frames() && g_snd_fstop && !g_snd_fstop(g_snd_au)) {
+        g_snd_paused = 1;
+        if (oah_snd_tr()) fprintf(stderr, "[snd] output stopped (silent)\n");
+    }
+    g_snd_pause_req = 0;
+    pthread_mutex_unlock(&g_snd_run_mx);
+}
+static void oah_snd_wake(void) {                /* a Sound Manager call: output runs again */
+    pthread_mutex_lock(&g_snd_run_mx);
+    g_snd_quiet = 0;
+    if (g_snd_paused) {
+        if (g_snd_ring_mode) { g_snd_paused = 0; pthread_cond_signal(&g_snd_run_cv); }
+        else if (g_snd_fstart && !g_snd_fstart(g_snd_au)) g_snd_paused = 0;
+        if (oah_snd_tr()) fprintf(stderr, "[snd] output running again%s\n", g_snd_paused ? " (start failed)" : "");
+    }
+    pthread_mutex_unlock(&g_snd_run_mx);
+}
+static void oah_snd_note_render(int active, unsigned int n) {
+    unsigned long lim = oah_snd_idle_frames();
+    if (active || g_snd_music_mix || g_snd_pend_n) { g_snd_quiet = 0; return; }
+    g_snd_quiet += n;
+    if (lim && g_snd_quiet >= lim && !g_snd_ring_mode && !g_snd_paused && !g_snd_pause_req) {
+        g_snd_pause_req = 1;
+        dispatch_async_f(dispatch_get_global_queue(0, 0), 0, oah_snd_pause_fn);
+    }
+}
 
 static int oah_snd_tr(void) {
     if (g_snd_trace < 0) g_snd_trace = (getenv("OAH_SNDTRACE") || getenv("OAH_VERBOSE")) ? 1 : 0;
@@ -211,13 +256,18 @@ static OSStatus oah_snd_render(void *ref, AudioUnitRenderActionFlags *fl, const 
             usleep(5);
         }
     }
-    for (c = g_snd_chans; c; c = c->next) oah_snd_mix_chan(c, out, n);
-    pthread_mutex_unlock(&g_snd_mx);
-    g_snd_renders++;
-    for (i = 0; i < 2 * n; i++) {
-        float a = out[i] < 0 ? -out[i] : out[i];
-        if (a > g_snd_outpeak) g_snd_outpeak = a;
-        if (out[i] > 1.f) out[i] = 1.f; else if (out[i] < -1.f) out[i] = -1.f;
+    {
+        int active = 0;
+        for (c = g_snd_chans; c; c = c->next) { oah_snd_mix_chan(c, out, n); if (c->head) active = 1; }
+        pthread_mutex_unlock(&g_snd_mx);
+        g_snd_renders++;
+        for (i = 0; i < 2 * n; i++) {
+            float a = out[i] < 0 ? -out[i] : out[i];
+            if (a > g_snd_outpeak) g_snd_outpeak = a;
+            if (a > 0.f) active = 1;
+            if (out[i] > 1.f) out[i] = 1.f; else if (out[i] < -1.f) out[i] = -1.f;
+        }
+        oah_snd_note_render(active, n);
     }
     return noErr;
 }
@@ -235,7 +285,7 @@ static int oah_snd_start_au(void) {
     AURenderCallbackStruct cb;
     AudioComponent comp;
     OSStatus e;
-    if (g_snd_au_state) return g_snd_au_state > 0;
+    if (g_snd_au_state) { if (g_snd_au_state > 0) oah_snd_wake(); return g_snd_au_state > 0; }
     g_snd_au_state = -1;
     h = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY | RTLD_GLOBAL);
     if (!h) h = dlopen("/System/Library/Frameworks/AudioUnit.framework/AudioUnit", RTLD_LAZY | RTLD_GLOBAL);
@@ -246,6 +296,8 @@ static int oah_snd_start_au(void) {
     fInit = (OSStatus (*)(AudioUnit))dlsym(h, "AudioUnitInitialize");
     fStart = (OSStatus (*)(AudioUnit))dlsym(h, "AudioOutputUnitStart");
     if (!fFind || !fNew || !fSet || !fInit || !fStart) { fprintf(stderr, "[snd] AudioToolbox symbols missing\n"); return 0; }
+    g_snd_fstart = fStart;
+    *(void **)&g_snd_fstop = dlsym(h, "AudioOutputUnitStop");
     memset(&d, 0, sizeof d);
     d.componentType = kAudioUnitType_Output;
     d.componentSubType = kAudioUnitSubType_DefaultOutput;
@@ -483,6 +535,7 @@ static void oah_snd_pump(void) {
 static int oah_snd_call(const char *name, unsigned int *R) {
     oah_snd_chan *c;
     if (name[0] != 'S' || name[1] != 'n' || name[2] != 'd') return 0;
+    if (g_snd_au_state > 0) oah_snd_wake();
     if (oah_snd_tr()) {                            /* stats every 5 s */
         static time_t last;
         time_t now = time(0);

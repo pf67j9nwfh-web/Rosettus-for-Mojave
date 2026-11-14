@@ -240,7 +240,9 @@ SAVE = {
 }
 # Steps that do not apply
 NO_TEXT = {'Database Utility': 'no text field (a list of the Office databases)',
-           'Microsoft Office Notifications': 'a reminder window with no text field'}
+           'Microsoft Office Notifications': 'a reminder window with no text field',
+           'Build-a-lot 2': 'a game: its title screen has no text field and nothing to copy',
+           'SimCity 4 Rush Hour': 'a game: its region view has no text field and nothing to copy'}
 IMAGE_COPY = ('Equation Editor',)
 QUIT_RETURN = ('Equation Editor',)   # its MathType tip at quit (default No)
 # Hide by the application menu: (x of its title, y of its Hide item) on this 1440x900 screen
@@ -634,6 +636,14 @@ else:
         pb = NSPasteboard.generalPasteboard(); pb.clearContents()
         key(0, cmd=True); time.sleep(0.5); key(8, cmd=True); time.sleep(2.5)
         subprocess.call(["osascript", "-e", "tell application \"Finder\" to activate"])   # Classic scrap apps convert on suspend (a live copy goes out at once)
+        # wait until the Finder really is in front: a busy Finder (no window open, its Recents
+        # window to build) came forward up to 20 s later, in the middle of the next steps, and the
+        # test stopped with "not in front" (Save As in Illustrator / InDesign, Cmd-H in TextWrangler)
+        try: fnd = int(subprocess.Popen(['pgrep', '-x', 'Finder'], stdout=subprocess.PIPE).communicate()[0].split()[0])
+        except Exception: fnd = 0
+        tf = time.time()
+        while fnd and time.time() - tf < 25 and front_pid() != fnd: time.sleep(0.25)
+        if fnd and time.time() - tf > 3: log('   (the Finder came to the front after %.1f s)' % (time.time() - tf))
         t3 = time.time()
         while time.time() - t3 < 15 and txt not in (pb.stringForType_(NSStringPboardType) or ""): time.sleep(0.5)
         got = pb.stringForType_(NSStringPboardType) or ''
@@ -739,6 +749,9 @@ else:
             asked = True
             shot('7-quit-dialog')
             if APP == 'Kid Pix Deluxe 4': mclick(cx - 2, cy + 33); time.sleep(4)   # its own "save your picture?": NO
+            sb = win_bounds(pid, 'SimCity 4 Rush Hour') if APP == 'SimCity 4 Rush Hour' else None
+            if sb:   # its own box, centred in the game window: "Quit SimCity 4" above "Cancel"
+                mclick(sb[0] + sb[2] / 2, sb[1] + sb[3] / 2 - 115); time.sleep(5)
             for i in range(4 if alive() else 0):                       # one question per unsaved window
                 key(2, cmd=True); time.sleep(3)      # Don't Save
                 if alive(): key(51, cmd=True); time.sleep(3)   # cmd-delete: Don't Save (10.6 sheets)
@@ -754,6 +767,12 @@ else:
         if not ok: os.system('kill -9 %d' % pid)
   except NotFront as ex:
     TARGET[0] = 0
+    # what took the front, and what the test app still shows: for the Finder-in-front stops
+    try:
+        fa = subprocess.Popen(['lsappinfo', 'info', '-only', 'name', subprocess.Popen(['lsappinfo', 'front'], stdout=subprocess.PIPE).communicate()[0].strip()], stdout=subprocess.PIPE).communicate()[0].strip()
+        log('   (in front: %s; the test app\'s windows %s)' % (fa, windows(pid)[:4]))
+        shot('abort')
+    except Exception: pass
     step('aborted', False, 'the test app was not in front, stopped (%s)' % ex)
     os.system('kill -9 %d' % pid)
 nr = nreports() - r0

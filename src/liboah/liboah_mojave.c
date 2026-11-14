@@ -3,6 +3,7 @@
 #define _XOPEN_SOURCE 600
 #define _DARWIN_C_SOURCE 1
 #include <stdio.h>
+#include <sys/attr.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -1552,12 +1553,33 @@ static int oah_background_kind(void) {
     kind = 0;
     if (getenv("OAH_NO_BGCHECK")) return kind;
     /* the program being run: after LaunchCFMApp for CFM apps, else what the rosetta script said */
+    int cfm = 0;
     for (i = 0; av && *av && (*av)[i]; i++) {
         const char *a = (*av)[i]; size_t L = strlen(a);
-        if (L >= 12 && !strcmp(a + L - 12, "LaunchCFMApp") && (*av)[i + 1]) { strlcpy(exe, (*av)[i + 1], sizeof exe); break; }
+        if (L >= 12 && !strcmp(a + L - 12, "LaunchCFMApp") && (*av)[i + 1]) { strlcpy(exe, (*av)[i + 1], sizeof exe); cfm = 1; break; }
     }
     if (!exe[0] && getenv("OAH_GUEST_EXE")) strlcpy(exe, getenv("OAH_GUEST_EXE"), sizeof exe);
     if (!exe[0]) return kind;
+    /* A program that is no application - not in an .app bundle, not a CFM application, no 'APPL'
+       file type - is a tool or helper (Office 2004's FontCacheTool, "Optimizing font menu
+       performance", started by Word at launch): on 10.6 it never became the front app by drawing,
+       and made foreground here it took the front from Word (keystrokes went to it, and a
+       background-only tool cannot be brought back behind). It checks in as background-only. Java's
+       own launcher is left as it was (AWT makes itself foreground). OAH_TOOL_FOREGROUND=1: as before. */
+    if (!cfm && !strstr(exe, ".app/Contents/MacOS/") && !getenv("OAH_TOOL_FOREGROUND")) {
+        const char *bn = strrchr(exe, '/');
+        struct { u_int32_t len; unsigned char fi[32]; } __attribute__((packed)) ab;
+        struct attrlist al;
+        int appl = 0;
+        memset(&al, 0, sizeof al); al.bitmapcount = ATTR_BIT_MAP_COUNT; al.commonattr = ATTR_CMN_FNDRINFO;
+        if (getattrlist(exe, &al, &ab, sizeof ab, 0) == 0 && !memcmp(ab.fi, "APPL", 4)) appl = 1;
+        bn = bn ? bn + 1 : exe;
+        if (!appl && strcmp(bn, "java") && !strstr(exe, "/JavaVM.framework/")) {
+            kind = 2;
+            fprintf(stderr, "[bridge/gen] %s is no application (a tool): kept in the background\n", exe);
+            return kind;
+        }
+    }
     if ((m = strstr(exe, ".app/Contents/MacOS/"))) {          /* bundle: Info.plist keys, then the .rsrc file */
         CFURLRef u; CFDataRef d = 0; CFPropertyListRef p = 0;
         const char *names[] = { "Info.plist", "Info-macos.plist" };

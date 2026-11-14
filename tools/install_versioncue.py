@@ -53,13 +53,20 @@ def remove_user(root,user):
     try:
         pid=int(open(pidfile).read().strip())
     except (IOError,ValueError): pid=0
-    deadline=time.time()+120
+    deadline=time.time()+150
     while pid>1:
         try: os.kill(pid,0)
         except OSError as error:
             if error.errno==errno.ESRCH: break
             raise
-        if time.time()>deadline: raise RuntimeError('Controller is still stopping; no files were replaced.')
+        if time.time()>deadline:
+            # The controller ends a stuck server shutdown itself after 90 s (VC_STOP_TIMEOUT); one
+            # still running now is stuck as well. End it, so the service is installed and started
+            # again: failing here left it unloaded, and Adobe's pane showed "not available".
+            sys.stderr.write('install_versioncue: controller %d did not stop in time; ended it\n'%pid)
+            try: os.kill(pid,9)
+            except OSError: pass
+            break
         time.sleep(1)
     os.unlink(path)
     print('Removed Version Cue agent for '+user.pw_name)
@@ -74,13 +81,20 @@ def remove_system(root):
     call(['/bin/launchctl','bootout','system/'+LABEL],quiet=True)
     try: pid=int(open('/Library/Logs/Rosettus/versioncue-controller.pid').read().strip())
     except (IOError,ValueError): pid=0
-    deadline=time.time()+120
+    deadline=time.time()+150
     while pid>1:
         try: os.kill(pid,0)
         except OSError as error:
             if error.errno==errno.ESRCH: break
             raise
-        if time.time()>deadline: raise RuntimeError('Controller is still stopping; no files were replaced.')
+        if time.time()>deadline:
+            # The controller ends a stuck server shutdown itself after 90 s (VC_STOP_TIMEOUT); one
+            # still running now is stuck as well. End it, so the service is installed and started
+            # again: failing here left it unloaded, and Adobe's pane showed "not available".
+            sys.stderr.write('install_versioncue: controller %d did not stop in time; ended it\n'%pid)
+            try: os.kill(pid,9)
+            except OSError: pass
+            break
         time.sleep(1)
     os.unlink(path)
     print('Removed Version Cue system service')
@@ -158,7 +172,13 @@ def main():
     if args.remove:
         remove_system(root)
         remove_user(root,user)
-    else: install(root,user)
+    else:
+        try: install(root,user)
+        except Exception:
+            # never leave an installed service unloaded because a step failed
+            daemon='/Library/LaunchDaemons/'+LABEL+'.plist'
+            if os.path.isfile(daemon) and os.geteuid()==0: call(['/bin/launchctl','bootstrap','system',daemon],quiet=True)
+            raise
 
 if __name__=='__main__':
     try: main()

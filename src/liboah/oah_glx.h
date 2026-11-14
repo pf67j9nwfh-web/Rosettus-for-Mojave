@@ -486,6 +486,7 @@ static int oah_cgl_attribs(U g, U *out, int max, int strip, char *desc, size_t d
         if (t == 54 || t == 53 || t == 84 || t == 80 || t == 81 || t == 83 || t == 75 || t == 78 || t == 90) continue;
         if (strip >= 1 && (t == 70 || t == 71 || t == 73 || t == 74)) continue;   /* RendererID SingleRenderer Accelerated ClosestPolicy */
         if (strip >= 2 && (t == 7 || t == 13 || t == 14 || t == 57)) continue;
+        if (strip >= 3 && (t == 55 || t == 56 || t == 59 || t == 60 || t == 61)) continue;   /* multisampling */
         out[o++] = t;
         if (val) out[o++] = v;
     }
@@ -540,7 +541,15 @@ static char g_flushpix[160];
    through such a texture, stayed white. Emulated: remember (surface -> texture name, target, size)
    and, each time the source context presents a frame, copy its back buffer into the texture on
    the GPU (the contexts share textures). OAH_STEXTRACE=1 logs. */
-static struct { U sid, tex, target, ifmt; int w, h, defined, fresh; } g_stex[16];
+static struct { U sid, tex, target, ifmt; int w, h, defined, fresh; U dctx; } g_stex[16];
+static struct { U ctx, root; } g_shr[128];         /* context -> its share group's first context */
+static U oah_shr_root(U c) { int i; for (i = 0; i < 128; i++) if (g_shr[i].ctx == c) return g_shr[i].root; return c; }
+static int oah_shr_known(U c) { int i; for (i = 0; i < 128; i++) if (g_shr[i].ctx == c) return 1; return 0; }
+static void oah_shr_note(U c, U share) {
+    int i; U r = share ? oah_shr_root(share) : c;
+    for (i = 0; i < 128 && g_shr[i].ctx && g_shr[i].ctx != c; i++) ;
+    if (i < 128) { g_shr[i].ctx = c; g_shr[i].root = r; }
+}
 static void *oah_ogl_sym(const char *n);
 /* One flipped copy of the current context's front/back buffer into surface texture k: draw
    framebuffer = an FBO with the texture attached, read framebuffer = the window (0). The FBO is
@@ -579,12 +588,80 @@ static int oah_stex_blit(int k, int frontbuf, int oldrb) {
     }
     bindfb(0x8CA8 /* READ_FRAMEBUFFER */, 0);
     rb(frontbuf ? 0x0404 : 0x0405);
+    {   int samples = 0;
+        geti(0x80A9 /* SAMPLES */, &samples);
+        if (samples > 0 && !getenv("OAH_NO_STEX_RESOLVE")) {
+            static void (*genrb)(int, U *), (*bindrb)(U, U), (*rbst)(U, U, int, int), (*fbrb)(U, U, U, U);
+            static U rfbo[16], rrb[16]; static int rw[16], rh[16];
+            if (!genrb) { *(void **)&genrb = oah_ogl_sym("glGenRenderbuffersEXT"); *(void **)&bindrb = oah_ogl_sym("glBindRenderbufferEXT");
+                          *(void **)&rbst = oah_ogl_sym("glRenderbufferStorageEXT"); *(void **)&fbrb = oah_ogl_sym("glFramebufferRenderbufferEXT"); }
+            if (genrb && bindrb && rbst && fbrb) {
+                if (!rfbo[k] || rw[k] != w || rh[k] != h || g_stex_fbo[k].ctx != ctx) {
+                    int oldr = 0;
+                    if (!rfbo[k] || g_stex_fbo[k].ctx != ctx) { rfbo[k] = 0; rrb[k] = 0; gen(1, &rfbo[k]); genrb(1, &rrb[k]); }
+                    geti(0x8CA7 /* RENDERBUFFER_BINDING */, &oldr);
+                    bindrb(0x8D41, rrb[k]); rbst(0x8D41, 0x8058 /* RGBA8 */, w, h); bindrb(0x8D41, (U)oldr);
+                    rw[k] = w; rh[k] = h;
+                }
+                bindfb(0x8CA9, rfbo[k]); fbrb(0x8CA9, 0x8CE0, 0x8D41, rrb[k]);
+                blit(0, 0, w, h, 0, 0, w, h, 0x4000, 0x2600);          /* resolve */
+                bindfb(0x8CA8, rfbo[k]); bindfb(0x8CA9, g_stex_fbo[k].fbo);
+                blit(0, 0, w, h, 0, h, w, 0, 0x4000, 0x2600);          /* flip into the texture */
+                {   static int nlog; if (nlog++ < 5) fprintf(stderr, "[cgl] surface texture %d: %d-sample source resolved, then flipped\n", k, samples); }
+                rb((U)oldrb);
+                bindfb(0x8CA8, (U)oldread); bindfb(0x8CA9, (U)olddraw);
+                return 1;
+            }
+        }
+    }
     blit(0, 0, w, h, 0, h, w, 0, 0x4000 /* COLOR_BUFFER_BIT */, 0x2600 /* NEAREST */);
     rb((U)oldrb);
     bindfb(0x8CA8, (U)oldread); bindfb(0x8CA9, (U)olddraw);
     return 1;
 }
+static int oah_stex_copy_mem(int k, int frontbuf) {
+    static U (*cur)(void); static int (*setcur)(U);
+    static void (*rp)(int, int, int, int, U, U, void *), (*ps)(U, int), (*us)(U, int), (*geti)(U, int *), (*rb)(U), (*bind)(U, U);
+    static void (*ti)(U, int, int, int, int, int, U, U, const void *);
+    U sctx, dctx = g_stex[k].dctx, target = g_stex[k].target;
+    int w = g_stex[k].w, h = g_stex[k].h, y, oldrb = 0, oldtex = 0, sw = 0, prl = 0, pal = 4, usw = 0, url = 0, ual = 4;
+    unsigned char *px, *fl;
+    static int noflip = -1;
+    if (!cur) {
+        *(void **)&cur = oah_ogl_sym("CGLGetCurrentContext"); *(void **)&setcur = oah_ogl_sym("CGLSetCurrentContext");
+        *(void **)&rp = oah_ogl_sym("glReadPixels"); *(void **)&ps = oah_ogl_sym("glPixelStorei"); us = ps;
+        *(void **)&geti = oah_ogl_sym("glGetIntegerv"); *(void **)&rb = oah_ogl_sym("glReadBuffer");
+        *(void **)&bind = oah_ogl_sym("glBindTexture"); *(void **)&ti = oah_ogl_sym("glTexImage2D");
+    }
+    if (noflip < 0) noflip = getenv("OAH_STEX_NOFLIP") ? 1 : 0;
+    if (!cur || !setcur || !rp || !ps || !geti || !rb || !bind || !ti || w <= 0 || h <= 0) return 0;
+    sctx = cur();
+    /* only between two contexts whose share groups we saw made (AGL contexts, Build-a-lot 2, are not
+       recorded here and keep the GPU copy) */
+    if (!dctx || !sctx || !oah_shr_known(dctx) || !oah_shr_known(sctx) || oah_shr_root(dctx) == oah_shr_root(sctx) || getenv("OAH_NO_STEX_MEMCOPY")) return 0;
+    if (!(px = (unsigned char *)malloc((size_t)w * h * 4 * 2))) return 0;
+    fl = px + (size_t)w * h * 4;
+    geti(0x0C02, &oldrb); geti(0x0D00, &sw); geti(0x0D02, &prl); geti(0x0D05, &pal);
+    rb(frontbuf ? 0x0404 : 0x0405);
+    ps(0x0D00, 0); ps(0x0D02, 0); ps(0x0D05, 4);
+    rp(0, 0, w, h, 0x80E1, 0x8367, px);
+    ps(0x0D00, sw); ps(0x0D02, prl); ps(0x0D05, pal); rb((U)oldrb);
+    if (!noflip) for (y = 0; y < h; y++) memcpy(fl + (size_t)y * w * 4, px + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
+    setcur(dctx);
+    geti(target == 0x84F5 ? 0x84F6 : 0x8069, &oldtex); geti(0x0CF0, &usw); geti(0x0CF2, &url); geti(0x0CF5, &ual);
+    us(0x0CF0, 0); us(0x0CF2, 0); us(0x0CF5, 4);
+    bind(target, g_stex[k].tex);
+    ti(target, 0, (int)(g_stex[k].ifmt ? g_stex[k].ifmt : 0x1908), w, h, 0, 0x80E1, 0x8367, noflip ? px : fl);
+    bind(target, (U)oldtex);
+    us(0x0CF0, usw); us(0x0CF2, url); us(0x0CF5, ual);
+    setcur(sctx);
+    g_stex[k].defined = 1;
+    {   static int nlog; if (nlog++ < 5) fprintf(stderr, "[cgl] surface texture %d: %dx%d copied through memory (source ctx %08x, destination %08x in another share group)\n", k, w, h, sctx, dctx); }
+    free(px);
+    return 1;
+}
 static void oah_stex_copy(int k, int frontbuf) {
+    if (oah_stex_copy_mem(k, frontbuf)) return;
     void (*bind)(U, U) = (void (*)(U, U))oah_ogl_sym("glBindTexture");
     void (*geti)(U, int *) = (void (*)(U, int *))oah_ogl_sym("glGetIntegerv");
     void (*rb)(U) = (void (*)(U))oah_ogl_sym("glReadBuffer");
@@ -622,7 +699,7 @@ static void oah_stex_set(U dctx, U sid, U target, U ifmt, int w, int h) {
     geti(target == 0x84F5 ? 0x84F6 : 0x8069, &tex);
     for (k = 0; k < 16 && g_stex[k].sid && !(g_stex[k].sid == sid && g_stex[k].tex == (U)tex); k++) ;
     if (k == 16) k = 15;
-    g_stex[k].sid = sid; g_stex[k].tex = (U)tex; g_stex[k].target = target; g_stex[k].ifmt = ifmt;
+    g_stex[k].sid = sid; g_stex[k].tex = (U)tex; g_stex[k].target = target; g_stex[k].ifmt = ifmt; g_stex[k].dctx = dctx;
     if (g_stex[k].w != w || g_stex[k].h != h) g_stex[k].defined = g_stex[k].fresh = 0;
     g_stex[k].w = w; g_stex[k].h = h;
     for (i = 0; i < 64; i++) if (g_glsurf[i].sid == sid && g_glsurf[i].ctx) { sctx = g_glsurf[i].ctx; break; }
@@ -779,6 +856,267 @@ static int oah_cgl_fullscreen(U ctx) {
     fprintf(stderr, "[cgl] CGLSetFullScreen(%08x): window %u surface %u %.0fx%.0f -> %d\n", ctx, wid, sid, r.w, r.h, err);
     return err;
 }
+/* ---- CGL pixel buffers, emulated ----
+   iWork '09 renders its 3D charts in an offscreen context drawing into a pbuffer
+   (SFC3DOffscreenPBufferContext) and textures from it with CGLTexImagePBuffer. Today's CGL still
+   exports the pbuffer calls but every CGLCreatePBuffer fails (kCGLBadDrawable, on Mojave and
+   Catalina alike), so the charts were not drawn and Pages / Keynote / Numbers logged assertions
+   and could crash. A pbuffer here is our own object: CGLSetPBuffer binds a framebuffer object of
+   its size (colour texture + depth/stencil renderbuffer) in that context, so whatever the app draws
+   goes there; CGLTexImagePBuffer reads those pixels back and loads them into the texture bound in
+   the receiving context. OAH_NO_PBUFFER=1: the native calls as before. */
+typedef struct { U magic; int w, h; U target, ifmt; int levels, refs;
+                 struct { U ctx, fbo, tex, rb; } b[8]; } oah_pbuf_t;
+#define OAH_PB_MAGIC 0x50427566u
+static oah_pbuf_t *oah_pb_get(U h) {
+    oah_pbuf_t *pb = (oah_pbuf_t *)(uintptr_t)h;
+    return (h > 0x1000 && pb->magic == OAH_PB_MAGIC) ? pb : 0;
+}
+static struct { U ctx; oah_pbuf_t *pb; } g_pb_ctx[32];   /* context -> pbuffer it draws into */
+static oah_pbuf_t *oah_pb_of_ctx(U ctx) {
+    int i;
+    for (i = 0; i < 32; i++) if (g_pb_ctx[i].ctx == ctx) return g_pb_ctx[i].pb;
+    return 0;
+}
+static void oah_pb_set_ctx(U ctx, oah_pbuf_t *pb) {
+    int i, f = -1;
+    for (i = 0; i < 32; i++) { if (g_pb_ctx[i].ctx == ctx) { f = i; break; } if (f < 0 && !g_pb_ctx[i].ctx) f = i; }
+    if (f < 0) f = 0;
+    g_pb_ctx[f].ctx = pb ? ctx : 0; g_pb_ctx[f].pb = pb;
+}
+static int oah_pb_off(void) { static int o = -1; if (o < 0) o = getenv("OAH_NO_PBUFFER") ? 1 : 0; return o; }
+#define PBF(name, ret, args) static ret (*name) args; if (!name) *(void **)&name = oah_ogl_sym(#name)
+/* run with ctx current; returns the previously current context */
+static U oah_pb_enter(U ctx) {
+    PBF(CGLGetCurrentContext, U, (void)); PBF(CGLSetCurrentContext, int, (U));
+    U prev = CGLGetCurrentContext ? CGLGetCurrentContext() : 0;
+    if (prev != ctx && CGLSetCurrentContext) CGLSetCurrentContext(ctx);
+    return prev;
+}
+static void oah_pb_leave(U ctx, U prev) {
+    PBF(CGLSetCurrentContext, int, (U));
+    if (prev != ctx && CGLSetCurrentContext) CGLSetCurrentContext(prev);
+}
+/* bind (creating it the first time) the framebuffer of pb in the current context ctx */
+static int oah_pb_bind(oah_pbuf_t *pb, U ctx) {
+    PBF(glGenFramebuffersEXT, void, (int, U *)); PBF(glBindFramebufferEXT, void, (U, U));
+    PBF(glGenTextures, void, (int, U *)); PBF(glBindTexture, void, (U, U));
+    PBF(glTexImage2D, void, (U, int, int, int, int, int, U, U, const void *));
+    PBF(glTexParameteri, void, (U, U, int)); PBF(glGetIntegerv, void, (U, int *));
+    PBF(glFramebufferTexture2DEXT, void, (U, U, U, U, int));
+    PBF(glGenRenderbuffersEXT, void, (int, U *)); PBF(glBindRenderbufferEXT, void, (U, U));
+    PBF(glRenderbufferStorageEXT, void, (U, U, int, int));
+    PBF(glFramebufferRenderbufferEXT, void, (U, U, U, U));
+    PBF(glCheckFramebufferStatusEXT, U, (U));
+    int i, f = -1, oldtex = 0, oldrb = 0;
+    U tt = pb->target == 0x84F5 ? 0x84F5 : 0x0DE1;          /* RECTANGLE, else 2D */
+    if (!glGenFramebuffersEXT || !glBindFramebufferEXT || !glFramebufferTexture2DEXT) return 10008;
+    for (i = 0; i < 8; i++) if (pb->b[i].ctx == ctx) { glBindFramebufferEXT(0x8D40, pb->b[i].fbo); return 0; }
+    for (i = 0; i < 8; i++) if (!pb->b[i].ctx) { f = i; break; }
+    if (f < 0) f = 7;
+    pb->b[f].ctx = ctx;
+    glGetIntegerv(tt == 0x84F5 ? 0x84F6 : 0x8069, &oldtex);   /* TEXTURE_BINDING_RECTANGLE / _2D */
+    glGenTextures(1, &pb->b[f].tex);
+    glBindTexture(tt, pb->b[f].tex);
+    glTexParameteri(tt, 0x2801, 0x2601); glTexParameteri(tt, 0x2800, 0x2601);   /* LINEAR */
+    glTexParameteri(tt, 0x2802, 0x812F); glTexParameteri(tt, 0x2803, 0x812F);   /* CLAMP_TO_EDGE */
+    glTexImage2D(tt, 0, 0x8058, pb->w, pb->h, 0, 0x80E1, 0x8367, 0);             /* RGBA8, BGRA, 8888_REV */
+    glBindTexture(tt, (U)oldtex);
+    glGenFramebuffersEXT(1, &pb->b[f].fbo);
+    glBindFramebufferEXT(0x8D40, pb->b[f].fbo);
+    glFramebufferTexture2DEXT(0x8D40, 0x8CE0, tt, pb->b[f].tex, 0);
+    {   /* depth / stencil only when the context's pixel format has them: a context without a depth
+           buffer may leave depth testing on with any function (it then always passes), and with a
+           depth buffer attached Keynote's 3D chart pass drew nothing */
+        PBF(CGLGetPixelFormat, U, (U)); PBF(CGLDescribePixelFormat, int, (U, int, int, int *));
+        U pix = CGLGetPixelFormat ? CGLGetPixelFormat(ctx) : 0;
+        int dz = 0, sz = 0;
+        if (pix && CGLDescribePixelFormat) { CGLDescribePixelFormat(pix, 0, 12, &dz); CGLDescribePixelFormat(pix, 0, 13, &sz); }
+        else dz = 1;
+        pb->b[f].rb = (U)(dz > 0 || sz > 0);              /* reused below as "wanted", then the name */
+    }
+    if (pb->b[f].rb && glGenRenderbuffersEXT && glRenderbufferStorageEXT && glFramebufferRenderbufferEXT) {
+        glGetIntegerv(0x8CA7, &oldrb);                                           /* RENDERBUFFER_BINDING */
+        glGenRenderbuffersEXT(1, &pb->b[f].rb);
+        glBindRenderbufferEXT(0x8D41, pb->b[f].rb);
+        glRenderbufferStorageEXT(0x8D41, 0x88F0, pb->w, pb->h);                   /* DEPTH24_STENCIL8 */
+        glFramebufferRenderbufferEXT(0x8D40, 0x8D00, 0x8D41, pb->b[f].rb);         /* depth */
+        glFramebufferRenderbufferEXT(0x8D40, 0x8D20, 0x8D41, pb->b[f].rb);         /* stencil */
+        glBindRenderbufferEXT(0x8D41, (U)oldrb);
+    }
+    {   U st = glCheckFramebufferStatusEXT ? glCheckFramebufferStatusEXT(0x8D40) : 0x8CD5;
+        static int nlog; if (nlog++ < 20) fprintf(stderr, "[cgl] pbuffer %p %dx%d: framebuffer %u in context %08x (status %04x)\n", (void *)pb, pb->w, pb->h, pb->b[f].fbo, ctx, st);
+        return st == 0x8CD5 ? 0 : 10011;
+    }
+}
+/* OAH_PBLOG=1: how many pixels of a pbuffer are set (debugging) */
+static void oah_pb_sample(oah_pbuf_t *pb, const char *why) {
+    PBF(glReadPixels, void, (int, int, int, int, U, U, void *));
+    PBF(glBindFramebufferEXT, void, (U, U)); PBF(glGetIntegerv, void, (U, int *)); PBF(glFinish, void, (void));
+    static int on = -1; int i, fb = 0, k, nz = 0; U prev; unsigned int *px;
+    if (on < 0) on = getenv("OAH_PBLOG") ? 1 : 0;
+    if (!on || !pb || !glReadPixels) return;
+    for (i = 0; i < 8; i++) if (pb->b[i].ctx && pb->b[i].fbo) break;
+    if (i == 8) return;
+    px = (unsigned int *)calloc((size_t)pb->w * pb->h, 4);
+    prev = oah_pb_enter(pb->b[i].ctx);
+    glGetIntegerv(0x8CA6, &fb); glBindFramebufferEXT(0x8D40, pb->b[i].fbo); glFinish();
+    {   int vp[4] = { -1, -1, -1, -1 }; glGetIntegerv(0x0BA2, vp); fprintf(stderr, "[cgl] pbuffer %p: viewport %d,%d %dx%d in its context\n", (void *)pb, vp[0], vp[1], vp[2], vp[3]); }
+    glReadPixels(0, 0, pb->w, pb->h, 0x80E1, 0x8367, px);
+    glBindFramebufferEXT(0x8D40, (U)fb);
+    oah_pb_leave(pb->b[i].ctx, prev);
+    for (k = 0; k < pb->w * pb->h; k += 7) if (px[k]) nz++;
+    fprintf(stderr, "[cgl] pbuffer %p %dx%d %s: %d of %d sampled pixels set (centre %08x, fb was %d)\n", (void *)pb, pb->w, pb->h, why,
+            nz, pb->w * pb->h / 7, px[(pb->h / 2) * pb->w + pb->w / 2], fb);
+    free(px);
+}
+/* the guest made a context current: if it draws into a pbuffer, its framebuffer is bound again
+   (something between CGLSetPBuffer and the drawing - a context switch on the host - left the
+   default framebuffer bound, and the chart was drawn into nothing) */
+static void oah_pb_rebind(U ctx) {
+    PBF(glBindFramebufferEXT, void, (U, U));
+    oah_pbuf_t *pb = oah_pb_of_ctx(ctx);
+    int i;
+    if (!pb || !glBindFramebufferEXT) return;
+    for (i = 0; i < 8; i++) if (pb->b[i].ctx == ctx && pb->b[i].fbo) { glBindFramebufferEXT(0x8D40, pb->b[i].fbo); return; }
+}
+static int oah_pb_call(const char *n, U *R) {
+    if (oah_pb_off()) return 0;
+    if (!strcmp(n, "CGLCreatePBuffer")) {                 /* (w, h, target, internal format, max level, CGLPBufferObj *) */
+        oah_pbuf_t *pb;
+        if ((int)R[3] <= 0 || (int)R[4] <= 0 || (int)R[3] > 8192 || (int)R[4] > 8192) { R[3] = 10008; return 1; }
+        pb = (oah_pbuf_t *)calloc(1, sizeof *pb);
+        pb->magic = OAH_PB_MAGIC; pb->w = (int)R[3]; pb->h = (int)R[4]; pb->target = R[5]; pb->ifmt = R[6];
+        pb->levels = (int)R[7]; pb->refs = 1;
+        if (R[8]) *(U *)R[8] = OSSwapHostToBigInt32((U)(uintptr_t)pb);
+        {   static int nlog; if (nlog++ < 20) fprintf(stderr, "[cgl] CGLCreatePBuffer(%d x %d, target %04x, format %04x) -> %p (emulated)\n", pb->w, pb->h, R[5], R[6], (void *)pb); }
+        R[3] = 0; return 1;
+    }
+    if (!strcmp(n, "CGLDescribePBuffer")) {               /* (pbuffer, w *, h *, target *, format *, mipmap *) */
+        oah_pbuf_t *pb = oah_pb_get(R[3]);
+        if (!pb) { R[3] = 10005; return 1; }
+        if (R[4]) *(U *)R[4] = OSSwapHostToBigInt32((U)pb->w);
+        if (R[5]) *(U *)R[5] = OSSwapHostToBigInt32((U)pb->h);
+        if (R[6]) *(U *)R[6] = OSSwapHostToBigInt32(pb->target);
+        if (R[7]) *(U *)R[7] = OSSwapHostToBigInt32(pb->ifmt);
+        if (R[8]) *(U *)R[8] = OSSwapHostToBigInt32((U)pb->levels);
+        R[3] = 0; return 1;
+    }
+    if (!strcmp(n, "CGLRetainPBuffer")) { oah_pbuf_t *pb = oah_pb_get(R[3]); if (pb) pb->refs++; return 1; }
+    if (!strcmp(n, "CGLGetPBufferRetainCount")) { oah_pbuf_t *pb = oah_pb_get(R[3]); R[3] = pb ? (U)pb->refs : 0; return 1; }
+    if (!strcmp(n, "CGLDestroyPBuffer") || !strcmp(n, "CGLReleasePBuffer")) {
+        /* the GL objects stay with their contexts (a few textures); the object is only marked dead
+           while a context may still be bound to it */
+        oah_pbuf_t *pb = oah_pb_get(R[3]);
+        oah_pb_sample(pb, n);
+        if (pb && --pb->refs <= 0) {
+            int i, used = 0;
+            for (i = 0; i < 32; i++) if (g_pb_ctx[i].pb == pb) used = 1;
+            if (!used) { pb->magic = 0; free(pb); }
+        }
+        R[3] = 0; return 1;
+    }
+    if (!strcmp(n, "CGLSetPBuffer")) {                    /* (ctx, pbuffer, face, level, screen); R[3] is native */
+        oah_pbuf_t *pb = oah_pb_get(R[4]);
+        U prev; int err;
+        if (!R[4] && oah_pb_of_ctx(R[3])) {               /* detached: back to framebuffer 0 */
+            PBF(glBindFramebufferEXT, void, (U, U));
+            prev = oah_pb_enter(R[3]);
+            if (glBindFramebufferEXT) glBindFramebufferEXT(0x8D40, 0);
+            oah_pb_leave(R[3], prev);
+            oah_pb_set_ctx(R[3], 0);
+            R[3] = 0; return 1;
+        }
+        if (!pb) { R[3] = 10005; return 1; }
+        prev = oah_pb_enter(R[3]);
+        err = oah_pb_bind(pb, R[3]);
+        oah_pb_leave(R[3], prev);
+        if (!err) oah_pb_set_ctx(R[3], pb);
+        R[3] = (U)err; return 1;
+    }
+    if (!strcmp(n, "CGLGetPBuffer")) {                    /* (ctx, CGLPBufferObj *, face *, level *, screen *) */
+        oah_pbuf_t *pb = oah_pb_of_ctx(R[3]);
+        if (R[4]) *(U *)R[4] = OSSwapHostToBigInt32((U)(uintptr_t)pb);
+        if (R[5]) *(U *)R[5] = 0;
+        if (R[6]) *(U *)R[6] = 0;
+        if (R[7]) *(U *)R[7] = 0;
+        R[3] = 0; return 1;
+    }
+    if (!strcmp(n, "CGLTexImagePBuffer")) {               /* (ctx, pbuffer, source buffer) */
+        PBF(glReadPixels, void, (int, int, int, int, U, U, void *));
+        PBF(glTexImage2D, void, (U, int, int, int, int, int, U, U, const void *));
+        PBF(glPixelStorei, void, (U, int)); PBF(glGetIntegerv, void, (U, int *));
+        PBF(glBindFramebufferEXT, void, (U, U)); PBF(glFinish, void, (void));
+        oah_pbuf_t *pb = oah_pb_get(R[4]);
+        U ctx = R[3], src = 0, prev; int i, pack = 4, unpack = 4, fb = 0;
+        void *px;
+        if (!pb || !glReadPixels || !glTexImage2D) { R[3] = 10005; return 1; }
+        for (i = 0; i < 8; i++) if (pb->b[i].ctx && pb->b[i].fbo) { src = pb->b[i].ctx; break; }
+        px = calloc((size_t)pb->w * pb->h, 4);
+        if (src) {                                        /* what was drawn into the pbuffer */
+            prev = oah_pb_enter(src);
+            glGetIntegerv(0x8CA6, &fb);                    /* FRAMEBUFFER_BINDING */
+            glBindFramebufferEXT(0x8D40, pb->b[i].fbo);
+            if (glFinish) glFinish();
+            glGetIntegerv(0x0D05, &pack); glPixelStorei(0x0D05, 4);
+            glReadPixels(0, 0, pb->w, pb->h, 0x80E1, 0x8367, px);
+            glPixelStorei(0x0D05, pack);
+            glBindFramebufferEXT(0x8D40, (U)fb);
+            oah_pb_leave(src, prev);
+        }
+        prev = oah_pb_enter(ctx);                         /* into the texture bound in ctx */
+        glGetIntegerv(0x0CF5, &unpack); glPixelStorei(0x0CF5, 4);
+        glTexImage2D(pb->target == 0x84F5 ? 0x84F5 : pb->target, 0, (int)(pb->ifmt == 0x1907 ? 0x8051 : 0x8058),
+                     pb->w, pb->h, 0, 0x80E1, 0x8367, px);
+        glPixelStorei(0x0CF5, unpack);
+        oah_pb_leave(ctx, prev);
+        {   static int nlog; if (nlog++ < 30) {
+                int k, nz = 0; unsigned int *q = (unsigned int *)px;
+                for (k = 0; k < pb->w * pb->h; k += 7) if (q[k]) nz++;
+                fprintf(stderr, "[cgl] CGLTexImagePBuffer(%08x, %p %dx%d, source %04x): from context %08x, %d of %d sampled pixels set\n",
+                        ctx, (void *)pb, pb->w, pb->h, R[5], src, nz, pb->w * pb->h / 7);
+            } }
+        free(px);
+        R[3] = 0; return 1;
+    }
+    return 0;
+}
+/* The OpenGL pixels of window wid (the context drawing on a surface of it) into its store: rows of
+   rb bytes, big-endian ARGB, the window's top row at store row (rows - hpx). Returns 1 when copied. */
+static int oah_glx_read_window(U wid, unsigned char *store, int rb, int rows, int wpx, int hpx) {
+    static U (*cur)(void); static int (*setcur)(U);
+    static void (*rp)(int, int, int, int, U, U, void *); static void (*ps)(U, int); static void (*gi)(U, int *);
+    static void (*rbuf)(U); static void (*fin)(void);
+    U ctx = 0, prev; int i, y, swap = 0, rowlen = 0, align = 4, db = 0x0405, rd = 0x0405;
+    unsigned char *tmp;
+    for (i = 0; i < 64; i++) if (g_glsurf[i].wid == wid && g_glsurf[i].ctx) { ctx = g_glsurf[i].ctx; break; }
+    if (!ctx || !store || wpx <= 0 || hpx <= 0 || hpx > rows || wpx * 4 > rb) return 0;
+    if (!rp) {
+        *(void **)&cur = oah_ogl_sym("CGLGetCurrentContext"); *(void **)&setcur = oah_ogl_sym("CGLSetCurrentContext");
+        *(void **)&rp = oah_ogl_sym("glReadPixels"); *(void **)&ps = oah_ogl_sym("glPixelStorei");
+        *(void **)&gi = oah_ogl_sym("glGetIntegerv"); *(void **)&rbuf = oah_ogl_sym("glReadBuffer"); *(void **)&fin = oah_ogl_sym("glFinish");
+    }
+    if (!cur || !setcur || !rp || !ps || !gi || !rbuf) return 0;
+    if (!(tmp = (unsigned char *)malloc((size_t)wpx * hpx * 4))) return 0;
+    prev = cur();
+    if (prev != ctx) setcur(ctx);
+    if (fin) fin();
+    gi(0x0D00, &swap); gi(0x0D02, &rowlen); gi(0x0D05, &align); gi(0x0C01, &db); gi(0x0C02, &rd);
+    ps(0x0D00, 0); ps(0x0D02, 0); ps(0x0D05, 4);
+    rbuf(db);                                       /* where it drew */
+    rp(0, 0, wpx, hpx, 0x80E1, 0x8035, tmp);        /* BGRA, UNSIGNED_INT_8_8_8_8: bytes A R G B */
+    rbuf(rd); ps(0x0D00, swap); ps(0x0D02, rowlen); ps(0x0D05, align);
+    if (prev != ctx) setcur(prev);
+    for (y = 0; y < hpx; y++)                       /* GL rows go up from the bottom */
+        memcpy(store + (size_t)(rows - 1 - y) * rb, tmp + (size_t)y * wpx * 4, (size_t)wpx * 4);
+    {   static int nlog; if (nlog++ < 20) {
+            unsigned int c = *(unsigned int *)(tmp + ((size_t)(hpx / 2) * wpx + wpx / 2) * 4);
+            fprintf(stderr, "[cgl] window %u: %dx%d OpenGL pixels (buffer %04x of context %08x) copied for CGWindowContextCreateImage, centre %08x\n",
+                    wid, wpx, hpx, db, ctx, OSSwapBigToHostInt32(c));
+        } }
+    free(tmp);
+    return 1;
+}
 static int oah_cgl_call(const char *n, U *R) {
     void *fn;
     if (strncmp(n, "CGL", 3)) return 0;
@@ -786,6 +1124,33 @@ static int oah_cgl_call(const char *n, U *R) {
     /* shadow contexts -> native (a no-op for pixel formats, renderer infos, ...) */
     R[3] = oah_cgl_native(R[3]);
     if (!strcmp(n, "CGLCopyContext") || !strcmp(n, "CGLCreateContext")) R[4] = oah_cgl_native(R[4]);
+    /* pixel buffers (emulated, above); a context drawing into one has no drawable to flush */
+    if (n[3] == 'C' || n[3] == 'D' || n[3] == 'R' || n[3] == 'G' || n[3] == 'S' || n[3] == 'T') {
+        if (strstr(n, "PBuffer") && oah_pb_call(n, R)) return 1;
+    }
+    if (!oah_pb_off() && (!strcmp(n, "CGLFlushDrawable") || !strcmp(n, "CGLClearDrawable") || !strcmp(n, "CGLSetSurface"))) {
+        oah_pbuf_t *pb = oah_pb_of_ctx(R[3]);
+        if (pb && n[3] == 'F') oah_pb_sample(pb, "flush");
+        if (pb && n[3] == 'F') {                          /* a pbuffer context: no buffer swap */
+            PBF(glFlush, void, (void));
+            U prev = oah_pb_enter(R[3]);
+            if (glFlush) glFlush();
+            oah_pb_leave(R[3], prev);
+            R[3] = 0; return 1;
+        }
+        if (pb) {                                         /* back to the window: framebuffer 0 */
+            PBF(glBindFramebufferEXT, void, (U, U));
+            U prev = oah_pb_enter(R[3]);
+            if (glBindFramebufferEXT) glBindFramebufferEXT(0x8D40, 0);
+            oah_pb_leave(R[3], prev);
+            oah_pb_set_ctx(R[3], 0);
+        }
+    }
+    if (n[3] == 'E' && !strcmp(n, "CGLErrorString") && !fn) {     /* a guest-readable string, not 10000 */
+        static char msg[48];
+        snprintf(msg, sizeof msg, "CGL error %d", (int)R[3]);
+        R[3] = (U)(uintptr_t)msg; return 1;
+    }
     if (!strcmp(n, "CGLGetCurrentContext")) {
         U c = fn ? ((U (*)(void))fn)() : 0;
         R[3] = oah_cgl_guest(c);
@@ -801,7 +1166,7 @@ static int oah_cgl_call(const char *n, U *R) {
     }
     if (!strcmp(n, "CGLChoosePixelFormat")) {          /* (attribs, CGLPixelFormatObj *pix, GLint *npix) */
         U at[128]; char desc[512]; int s; U pix = 0; int np = 0, err = 10000;
-        for (s = 0; s < 3 && !pix; s++) {
+        for (s = 0; s < (getenv("OAH_NO_MSFALLBACK") ? 3 : 4) && !pix; s++) {
             oah_cgl_attribs(R[3], at, 128, s, desc, sizeof desc);
             err = ((int (*)(U *, U *, int *))fn)(at, &pix, &np);
             fprintf(stderr, "[cgl] CGLChoosePixelFormat strip=%d attribs %s-> err %d pix %08x n %d\n", s, desc, err, pix, np);
@@ -814,12 +1179,14 @@ static int oah_cgl_call(const char *n, U *R) {
     if (!strcmp(n, "CGLCreateContext")) {              /* (pix, share, CGLContextObj *ctx) */
         U ctx = 0; int err = ((int (*)(U, U, U *))fn)(R[3], R[4], &ctx);
         if (R[5]) *(U *)R[5] = OSSwapHostToBigInt32(err ? 0 : oah_cgl_guest(ctx));
+        if (!err && ctx) oah_shr_note(ctx, R[4]);
         fprintf(stderr, "[cgl] CGLCreateContext(%08x, share %08x) -> err %d ctx %08x\n", R[3], R[4], err, ctx);
         R[3] = (U)err; return 1;
     }
     if (!strcmp(n, "CGLSetCurrentContext")) {
         int err = ((int (*)(U))fn)(R[3]);
         if (!err && R[3]) oah_gl_ctx_made_current(R[3]);
+        if (!err && R[3] && !oah_pb_off()) oah_pb_rebind(R[3]);
         if (!err) oah_cgl_guest_current(R[3] ? oah_cgl_guest(R[3]) : 0, R[1]);
         R[3] = (U)err; return 1;
     }
@@ -1061,6 +1428,40 @@ static int oah_surf_call(const char *n, U *R) {
         return 1;
     }
 }
+/* after a guest glFlush / glFinish: if the current context draws (single-buffered, into its front
+   buffer) on a surface that feeds surface textures, refresh them now. Double-buffered sources keep
+   refreshing at CGLFlushDrawable only (Build-a-lot 2). OAH_NO_STEX_GLFLUSH=1: off. */
+static void oah_stex_after_glflush(void) {
+    static U (*cur)(void); static void (*geti)(U, int *); static void (*glf)(void); static int off = -1;
+    U ctx, sid = 0; int i, k, db = 0, n = 0;
+    if (off < 0) off = getenv("OAH_NO_STEX_GLFLUSH") ? 1 : 0;
+    if (off || !g_stex[0].sid) return;
+    if (!cur) { *(void **)&cur = oah_ogl_sym("CGLGetCurrentContext"); *(void **)&geti = oah_ogl_sym("glGetIntegerv"); *(void **)&glf = oah_ogl_sym("glFlush"); }
+    if (!cur || !geti || !(ctx = cur())) return;
+    for (i = 0; i < 64; i++) if (g_glsurf[i].ctx == ctx) { sid = g_glsurf[i].sid; break; }
+    if (!sid) return;
+    geti(0x0C01, &db);                              /* DRAW_BUFFER */
+    if (db != 0x0404 && db != 0x0400) return;       /* FRONT / FRONT_LEFT only */
+    if (getenv("OAH_STEXPROBE")) {                  /* what the source buffers hold (debugging) */
+        static void (*rp)(int, int, int, int, U, U, void *); static void (*rbf)(U);
+        unsigned int px[64 * 64]; int b2, j, nz;
+        if (!rp) { *(void **)&rp = oah_ogl_sym("glReadPixels"); *(void **)&rbf = oah_ogl_sym("glReadBuffer"); }
+        for (b2 = 0; b2 < 2 && rp && rbf; b2++) {
+            int vp[4] = { 0, 0, 0, 0 }, err;
+            geti(0x0BA2, vp);
+            rbf(b2 ? 0x0405 : 0x0404);
+            memset(px, 0, sizeof px);
+            rp(vp[2] / 2 - 32, vp[3] / 2 - 32, 64, 64, 0x80E1, 0x8367, px);
+            err = ((int (*)(void))oah_ogl_sym("glGetError"))();
+            for (j = 0, nz = 0; j < 64 * 64; j++) if (px[j]) nz++;
+            fprintf(stderr, "[cgl] stex probe ctx %08x %s: viewport %dx%d, %d of 4096 centre pixels set (%08x), err %x\n", ctx, b2 ? "BACK" : "FRONT", vp[2], vp[3], nz, px[32 * 64 + 32], err);
+        }
+        rbf(0x0404);
+    }
+    for (k = 0; k < 16 && g_stex[k].sid; k++) if (g_stex[k].sid == sid) { oah_stex_copy(k, 1); g_stex[k].fresh = 1; n++; }
+    if (n && glf) glf();
+    {   static int nlog; if (n && nlog++ < 10) fprintf(stderr, "[cgl] surface texture: glFlush of single-buffered ctx %08x refreshed %d texture(s) (surface %u)\n", ctx, n, sid); }
+}
 static int oah_glx_call(unsigned int idx, const char *n, U *R) {
     static unsigned char kind[4096];   /* 0 unknown, 1 generic gl, 2 CGL / surface, 3 not ours */
     int k;
@@ -1074,6 +1475,10 @@ static int oah_glx_call(unsigned int idx, const char *n, U *R) {
         }
     }
     if (kind[idx] == 2) return oah_cgl_call(n, R) || oah_surf_call(n, R);
-    if (kind[idx] == 1) return oah_glx_gl(n, R);
+    if (kind[idx] == 1) {
+        int r = oah_glx_gl(n, R);
+        if (n[2] == 'F' && (!strcmp(n, "glFlush") || !strcmp(n, "glFinish"))) oah_stex_after_glflush();
+        return r;
+    }
     return 0;
 }

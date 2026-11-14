@@ -11,7 +11,11 @@
        alias data with the guest Alias Manager (FSNewAlias), so they match the guest's volumes;
      - observers are accepted and never called; changes the guest makes (insert / move / remove /
        set) are NOT written to Mojave's lists unless OAH_SFL_RW=1 - a 10.6 Finder-era framework
-       must not rewrite the user's real sidebar.
+       must not rewrite the user's real sidebar. The app's own recent-documents list
+       (kLSSharedFileListApplicationRecentDocuments: 10.6 AppKit's File > Open Recent) is the exception:
+       it belongs to the app alone (Mojave keeps one per bundle identifier), so it is created natively
+       and the app's inserts and removals go to it; it was NULL before and Open Recent forgot every
+       document at quit (OAH_NO_APPRECENT=1: as before).
    Lists other than the global favorites / volumes / saved searches / recents stay unavailable (NULL).
    OAH_NO_SFL=1 disables (the guest functions answer as before). OAH_SFLTRACE=1 logs. */
 #define OAH_SFL_MAX 2048
@@ -113,9 +117,10 @@ static int oah_sfl_call(const char *n, unsigned int *R) {
         if (t) CFStringGetCString(t, tb, sizeof tb, kCFStringEncodingUTF8);
         if (t && cr && (strstr(tb, "FavoriteItems") || strstr(tb, "FavoriteVolumes") || strstr(tb, "SavedSearch") ||
                         strstr(tb, "RecentApplication") || strstr(tb, "RecentDocument") || strstr(tb, "RecentServer"))
-            && !strstr(tb, "ApplicationRecentDocuments"))
+            && (!strstr(tb, "ApplicationRecentDocuments") || !getenv("OAH_NO_APPRECENT")))
             l = cr(NULL, t, NULL);
-        R[3] = l ? oah_sfl_wrap(l, 1, 0, 0) : 0;
+        /* list field 1: the app's own list, which takes the app's changes */
+        R[3] = l ? oah_sfl_wrap(l, 1, strstr(tb, "ApplicationRecentDocuments") ? 1 : 0, 0) : 0;
         if (l) CFRelease(l);
         if (oah_sfltr()) fprintf(stderr, "[sfl] Create(\"%s\") -> native %p guest %08x\n", tb, l, R[3]);
         if (t) CFRelease(t);
@@ -271,9 +276,9 @@ static int oah_sfl_call(const char *n, unsigned int *R) {
             CFURLRef u = n[10] == 'U' ? oah_guest_url_native(R[7]) : oah_guest_fsref_native(R[7]);
             void *it = NULL;
             if (!f) f = (void *(*)(void *, void *, CFStringRef, void *, CFURLRef, CFDictionaryRef, CFArrayRef))oah_sfl_nsym("LSSharedFileListInsertItemURL");
-            if (rw && f && u) it = f(e->n, oah_sfl_after(R[4]), NULL, NULL, u, NULL, NULL);
+            if ((rw || e->list == 1) && f && u) it = f(e->n, oah_sfl_after(R[4]), NULL, NULL, u, NULL, NULL);
             if (oah_sfltr()) { char b[1024] = ""; if (u) CFURLGetFileSystemRepresentation(u, true, (UInt8 *)b, sizeof b);
-                               fprintf(stderr, "[sfl] %s(%08x, %s)%s\n", n, e->g, b, rw ? "" : " (not written: OAH_SFL_RW=0)"); }
+                               fprintf(stderr, "[sfl] %s(%08x, %s)%s\n", n, e->g, b, (rw || e->list == 1) ? "" : " (not written: OAH_SFL_RW=0)"); }
             if (u) CFRelease(u);
             if (it) { static UInt32 (*gid)(void *); if (!gid) gid = (UInt32 (*)(void *))oah_sfl_nsym("LSSharedFileListItemGetID");
                       R[3] = oah_sfl_wrap(it, 2, e->g, gid ? gid(it) : 0); CFRelease(it); }
@@ -282,13 +287,13 @@ static int oah_sfl_call(const char *n, unsigned int *R) {
         }
         if (!strcmp(n, "ItemRemove") || !strcmp(n, "ItemMove") || !strcmp(n, "RemoveAllItems")) {
             oah_sfl_t *it = oah_sfl_find(R[4]);
-            if (rw) {
+            if (rw || e->list == 1) {
                 if (n[0] == 'R') { static OSStatus (*f)(void *); if (!f) f = (OSStatus (*)(void *))oah_sfl_nsym("LSSharedFileListRemoveAllItems"); R[3] = f ? f(e->n) : 0; }
                 else if (it && n[4] == 'R') { static OSStatus (*f)(void *, void *); if (!f) f = (OSStatus (*)(void *, void *))oah_sfl_nsym("LSSharedFileListItemRemove"); R[3] = f ? f(e->n, it->n) : 0; }
                 else if (it) { static OSStatus (*f)(void *, void *, void *); if (!f) f = (OSStatus (*)(void *, void *, void *))oah_sfl_nsym("LSSharedFileListItemMove"); R[3] = f ? f(e->n, it->n, oah_sfl_after(R[5])) : 0; }
                 else R[3] = (unsigned int)-50;
             } else R[3] = 0;
-            if (oah_sfltr()) fprintf(stderr, "[sfl] %s(%08x)%s\n", n, e->g, rw ? "" : " (not written)");
+            if (oah_sfltr()) fprintf(stderr, "[sfl] %s(%08x)%s\n", n, e->g, (rw || e->list == 1) ? "" : " (not written)");
             return 1;
         }
     }

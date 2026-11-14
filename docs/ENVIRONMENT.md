@@ -13,6 +13,9 @@ the useful ones.
 | `OAH_ROOT=dir` | install folder (default: the folder of liboah_mojave.dylib) |
 | `OAH_NO_GTB=1` | run the bridged main frameworks instead of the guest-toolbox overlay (gtb mode is the default) |
 | `OAH_HOST_SYSVERSION=1` | report Mojave's version to apps instead of 10.6.8 |
+| `OAH_NO_APPRECENT=1` | the app's own recent-documents list (File > Open Recent in Cocoa apps) is unavailable, as before 1.2: Open Recent is empty after a relaunch |
+| `OAH_NO_UPTIMEFIX=1` | on a Mac up for 12 days or more, `AbsoluteToDuration` of an `UpTime()` reading is not counted from the app's start; it then answers kDurationForever after 24.8 days of uptime (Build-a-lot 2 stops at its splash screen). `OAH_UPTIMEFIX=1` applies the fix at any uptime (testing), `OAH_UPTIMEFIX_LOG=1` logs when it is on |
+| `VC_STOP_TIMEOUT=N` | Version Cue service: seconds to wait for a server shutdown before ending it and its database (default 90, minimum 10) |
 | `OAH_QUIET_EXIT=1` | do not log non-zero exit codes |
 | `OAH_NO_REPORTS=1` | no crash/hang reports in ~/Library/Logs/Rosettus/Reports |
 | `OAH_NO_TELEMETRY=1` | no unbridged-call tables in ~/Library/Logs/Rosettus/Telemetry |
@@ -153,7 +156,7 @@ dumped on demand.
 | `OAH_CLIPTRACE=1` | log each clipboard import / export and the flavors seen |
 | `OAH_CLIP_OFFMAIN=1` | read and write the guest clipboard on the sync thread instead of the app's main thread |
 | `OAH_CLIP_PROMISED=1` | also export flavors the copying app only promised (normally left out: reading them runs the app's own provider inside the sync, and Hex Fiend's put up a modal window) |
-| `OAH_NO_STATUSBAR=1` | status items (menu bar apps) as before 1.1: not shown (the status bar calls are stubs again) |
+| `OAH_NO_STATUSBAR=1` | status items (menu bar apps) as before 1.2: not shown (the status bar calls are stubs again) |
 | `OAH_STATUSBAR_LOG=1` | log the status items' registration and placement |
 | `OAH_NO_SBDARK=1` | a status item's title is not made light in Dark Mode |
 | `OAH_NO_PREVACT=1` | `CGSSetPreventsActivation` stays a no-op |
@@ -161,6 +164,18 @@ dumped on demand.
 | `OAH_NO_SBWATCH=1` | our status items are not moved when other apps' items come or go (the gap a quitting app leaves stays) |
 | `OAH_NO_TRANSFORMMENUBAR=1` | after Show in Dock (TransformProcessType to foreground) the app's menu bar is not put up: the previous app's menus stay |
 | `OAH_NO_TRANSFORMSTATE=1` | HIToolbox's cached process kind is not updated by TransformProcessType |
+| `OAH_NO_DRAGREGION=1` | textured windows are not moved by a drag in their drag regions (CGSAddDragRegion is a no-op again) |
+| `OAH_NO_PBUFFER=1` | CGL pbuffers are not emulated (CGLCreatePBuffer fails, as natively) |
+| `OAH_NO_NEWWINRETRY=1` | a window the window server refuses (backing type 0) is not created again as buffered |
+| `OAH_NO_MSFALLBACK=1` | a pixel format that asks for multisampling fails instead of being chosen without it |
+| `OAH_NO_STEX_GLFLUSH=1` | surface textures are refreshed only at a buffer swap, not at glFlush / glFinish of a front-buffer context |
+| `OAH_NO_STEX_RESOLVE=1` | a multisampled surface is copied into its surface texture without resolving it first |
+| `OAH_NO_STEX_MEMCOPY=1` | a surface texture in another share group is copied on the GPU (draws into the wrong texture) |
+| `OAH_NO_WCTXIMAGE=1` | CGWindowContextCreateImage of a GL window is not read back from OpenGL |
+| `OAH_PBLOG=1` | logs the pbuffer emulation |
+| `OAH_EV_BG_IDLE_MS=n` | event polling interval in ms while the app is in the background and quiet (default 200; 0 = the foreground interval) |
+| `OAH_SND_IDLE_SECS=n` | seconds of silence before the Sound Manager output stops until the next sound (default 10; 0 = never) |
+| `OAH_BUTTON_PULSE=1` | default buttons pulse as on Snow Leopard (Carbon and Cocoa) |
 | `OAH_MB_PIXELS=1` | menu bar: publish the guest's own 1x title pixels instead of drawing the titles natively at Retina resolution |
 | `OAH_HIDPI=1` | experimental, off by default: give PowerPC windows a 2x backing store on Retina displays, so the guest renders text and Quartz drawing at 2x (QuickDraw stays 1x, pixel-doubled). The native window context stays 1x on Mojave, so each window also gets a CGS surface at resolution 2 drawn by a CGL context (backing size = the store's pixels): the 2x pixels reach the screen. Also switched on by Rosettus Launcher's File > Sharp Text on Retina Displays (com.rosettus Retina) |
 | `OAH_NO_CUIFRAME1X=1` | with `OAH_CUISCALE`: Carbon window frames are not drawn through a 1x bitmap (their title bar background is then missing at 2x) |
@@ -171,7 +186,7 @@ dumped on demand.
 | `OAH_RLAUNCH_MULTI=1` | let a launcher or patched app start a second copy of a PowerPC app that is already running (normally it hands its documents to the running copy and brings that to the front) |
 | `OAH_NO_REOPENSHOW=1` | do not bring the app to the front when it gets a reopen event (Finder / Spotlight / `open` on the running app) |
 | `OAH_EXITTRACE=1` | log every guest exit, also with status 0 (with `OAH_VERBOSE=1`: the native caller) |
-| `OAH_SCAN_ANON=1` | also scan anonymous memory page by page when looking for PowerPC images (the 1.1 behaviour: it made the translator's code blocks and every malloc region resident, 300-500 MB per app) |
+| `OAH_SCAN_ANON=1` | also scan anonymous memory page by page when looking for PowerPC images (the behaviour before 1.2: it made the translator's code blocks and every malloc region resident, 300-500 MB per app) |
 | `OAH_MEMREPORT=s`, `OAH_DUMPBLOCKS=1` | s seconds after start, log memory by mapping (resident / dirty); with `OAH_DUMPBLOCKS` also write the translator's 26 MB pool blocks to /tmp for analysis |
 | `OAH_NO_SHMEMFIX=1` | Office 2004: keep stale ShMem semaphores and shared memory left by a crashed Office app (normally removed when no other Office app runs) |
 | `OAH_NO_SPAWNFIX=1` | pass a PowerPC app's `posix_spawn` to the kernel unchanged (it fails with EINVAL on Mojave: NSTask helpers exit with status 5) |
@@ -202,5 +217,10 @@ framework (which cannot reach Mojave's securityd); `OAH_KCLOG=1` logs the keycha
 writes item data in the process instead of through `native/rosettus-kc` (securityd then refuses it). `OAH_NO_SCSTORE=1` /
 `OAH_SCLOG=1`: the same for the System Configuration store, `OAH_NO_FSEVENTS=1` / `OAH_FSELOG=1` for FSEvents streams,
 `OAH_NO_POWERSOURCES=1` / `OAH_PSLOG=1` for the power sources.
+`OAH_TOOL_FOREGROUND=1`: a PowerPC program that is no application (no .app bundle, CFM application or
+'APPL' type: Office 2004's FontCacheTool) is made a foreground app when it connects to the window
+server, as before (by default it checks in as background-only, as on 10.6).
+`OAH_NO_FPKEEP=1`: f14-f31 are not put back after `CFHostStartInfoResolution` (the translator
+loses f30/f31 during the lookup); `OAH_FPKEEP_LOG=1` logs each time they had changed.
 `OAH_NO_HID=1` leaves HID devices (IOHIDManager, IOHIDDevice, ...) to the PowerPC IOKit, which cannot open them;
 `OAH_HIDLOG=1` logs the HID calls. `OAH_NO_HIDCOM=1` leaves only the old IOHIDLib plug-in interface to the guest.

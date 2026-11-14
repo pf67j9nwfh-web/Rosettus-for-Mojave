@@ -107,14 +107,24 @@ Known gaps:
 * Kernel extensions and input methods in PowerPC code cannot load.
 * AltiVec code runs, but slower than on a G4/G5.
 
-## Test results for Rosettus for Mojave 1.1
+## Test results for Rosettus for Mojave 1.2
 
 * Menu bar apps (four PowerPC test apps built on Snow Leopard, `tests/ppc/menubar`): an app with a
   Dock icon and a status item, a menu-bar-only app (LSUIElement), and one that counts in its item's
   title every 2 s, rebuilds its menu each time it opens and moves itself into and out of the Dock
   (TransformProcessType). All three items show side by side; each menu opens under its item; Say
   Hello, Open Window and Quit work; Show in Dock gives a Dock icon, Hide from Dock removes it and
-  the item stays. When one of these apps quits (from its menu, or killed), the other items move right to close the gap and their menus still open under them; after Show in Dock the app's own menus take over the menu bar and open. A fourth test app has a picture item: a black template glyph with a white highlighted version, a colour icon, and icon with title; each shows, highlights while its menu is open and resizes correctly, also in Dark Mode. The same on Rosettus for Catalina.
+  the item stays. When one of these apps quits (from its menu, or killed), the other items move right to close the gap and their menus still open under them; after Show in Dock the app's own menus take over the menu bar and open. A fourth test app has a picture item: a black template glyph with a white highlighted version, a colour icon, and icon with title; each shows, highlights while its menu is open and resizes correctly, also in Dark Mode.
+* Textured windows (Pages, Keynote, Numbers: the template / theme chooser and documents) move when dragged by the title bar or toolbar background; a drag that starts on a control does not move them. The same on Rosettus for Catalina.
+* iWork '09 charts: 2D and 3D charts are inserted and drawn in Pages and Keynote (tested: 2D column, 3D column, 3D pie). The same on Rosettus for Catalina.
+* Behaviour tests on the 1.2 library (shared install, apps opened through their launchers):
+  TextWrangler, Hex Fiend, Pages and Keynote (11/11), Mactracker, Word, Excel and PowerPoint
+  (10/10), Illustrator CS2 (11/11), Kid Pix Deluxe 4, AppleWorks 6, Bejeweled 2, SimCity 4 and
+  Transmission: all steps pass.
+* `tests/ppc/fpsave.c` and `fphost.c`: f14-f31 are kept across CFHostStartInfoResolution
+  (PASS; FAIL with 1.1, as with stock Rosetta on Snow Leopard).
+
+## Test results for Rosettus for Mojave 1.1
 
 The full app test was run again on the 1.1 library (shared install, apps opened through their
 launchers in `/Applications/Rosettus`), with the same steps as for 1.0 below. Every app passed the

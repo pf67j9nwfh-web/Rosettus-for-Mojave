@@ -11,6 +11,26 @@ static volatile sig_atomic_t stopping;
 static int stopSent;
 static CFAbsoluteTime stopSince, lastWake;
 static int previousState=-99;
+static int forced;
+/* A shutdown that never finishes. Adobe's server can stay in state 3 (stopping) for good: its Java
+   side stalls, or it believes its database is not running ("Cannot stop non-running database")
+   and never asks it to quit, and then waits for it. The pane shows "Stopping Version Cue CS2..."
+   with every control disabled, and a reinstall could not replace the controller. After
+   VC_STOP_TIMEOUT seconds (default 90; a normal shutdown takes 10-20 s) the server's process
+   group - the server and its database, which the controller started as a group of their own - is
+   ended. Nothing writes to the database by then; InnoDB recovers its log at the next start. */
+static double stopTimeout(void) { const char *e=getenv("VC_STOP_TIMEOUT"); double v=e?atof(e):90; return v>=10?v:90; }
+static void forceStop(int serverPID) {
+    pid_t group=getpgid(serverPID);
+    forced=1;
+    if(group==serverPID && group!=getpgrp()) {
+        killpg(group,SIGKILL);
+        fprintf(stderr,"vc-controller: server %d still stopping after %.0f s: ended it and its database (process group %d)\n",serverPID,stopTimeout(),(int)group);
+    } else {
+        kill(serverPID,SIGKILL);
+        fprintf(stderr,"vc-controller: server %d still stopping after %.0f s: ended it\n",serverPID,stopTimeout());
+    }
+}
 static void signalStop(int sig) { stopping=1; }
 static void startServer(void) {
     if (child && (kill(child,0)==0)) return;
@@ -66,7 +86,8 @@ static void tick(CFRunLoopTimerRef timer,void *info) {
             pid_t helper=0; int result=posix_spawn(&helper,"/bin/bash",NULL,NULL,args,environ);
             fprintf(stderr,"vc-controller: database wake result=%d\n",result);lastWake=now;
         }
-    } else {stopSince=0;lastWake=0;}
+        if(serverPID>1 && !forced && now-stopSince>=stopTimeout()) forceStop(serverPID);
+    } else {stopSince=0;lastWake=0;forced=0;}
     if(stopping && !child && state<0) CFRunLoopStop(CFRunLoopGetCurrent());
 }
 int main(int argc,const char **argv) {

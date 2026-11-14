@@ -13,6 +13,7 @@
    Store layout: g_cgs_rows rows of g_cgs_rb bytes. A window of height h uses
    the LAST h rows, so a bitmap context made once over the whole store keeps
    its origin (bottom-left) on the window's bottom row after any resize. */
+static int oah_blitlog(void) { static int v = -1; if (v < 0) v = getenv("OAH_BLITLOG") ? 1 : 0; return v; }   /* OAH_BLITLOG=1: log window blits */
 static int g_gtb = -1;
 static int oah_gtb(void) {
     if (g_gtb < 0) g_gtb = getenv("OAH_GTB") ? 1 : 0;
@@ -1520,7 +1521,7 @@ static void oah_cgs_blit_unl(oah_cgswin_t *w) {
                 for (y1 = ih; y1 > y0 && !memcmp(w->shadow + (y1 - 1) * rowb, bits + (size_t)(y1 - 1) * wrb, rowb); y1--) ;
                 for (y = y0; y < y1; y++) memcpy(w->shadow + y * rowb, bits + (size_t)y * wrb, rowb);
             }
-            if (getenv("OAH_BLITLOG")) {
+            if (oah_blitlog()) {
                 int nz = 0, nrgb = 0, xx, yy;
                 for (yy = y0; yy < y1; yy += 4) for (xx = 0; xx < iw; xx += 4) {
                     unsigned char *px = bits + (size_t)yy * wrb + (size_t)xx * 4;
@@ -1631,6 +1632,11 @@ static unsigned int oah_cgs_new_window(int type, float x, float y, unsigned int 
     if (!oah_cgs_region_bounds(shape, &b)) { b.x = b.y = 0; b.w = b.h = 1; }
     nr = oah_cgs_nregion(&b);
     err = p_CGSNewWindow ? p_CGSNewWindow(g_ncid, type, x, y, nr, &wid) : -1;
+    if (err && type != 2 && p_CGSNewWindow && !getenv("OAH_NO_NEWWINRETRY")) {
+        int e0 = err;
+        err = p_CGSNewWindow(g_ncid, 2, x, y, nr, &wid);
+        CGSLOG("[cgs] NewWindow type %d failed (%d): made buffered -> err %d wid %u\n", type, e0, err, wid);
+    }
     oah_cgs_nrelease(nr);
     CGSLOG("[cgs] NewWindow type %d at %.0f,%.0f shape %.0f,%.0f %.0fx%.0f -> err %d wid %u\n",
            type, x, y, b.x, b.y, b.w, b.h, err, wid);
@@ -1873,7 +1879,7 @@ static void oah_unlock_blit_run(double t) {
     }
     g_ulb_n = k; g_ulb_at = next;
     pthread_mutex_unlock(&g_ulb_mu);
-    if (nrun && getenv("OAH_BLITLOG")) fprintf(stderr, "[blit] after unlock: %d window(s)\n", nrun);
+    if (nrun && oah_blitlog()) fprintf(stderr, "[blit] after unlock: %d window(s)\n", nrun);
     g_in_ulb = 1;
     for (i = 0; i < nrun; i++) { oah_cgswin_t *w = oah_cgs_win(run[i]); if (w) oah_cgs_blit(w); }
     g_in_ulb = 0;
@@ -2414,7 +2420,14 @@ static void *oah_ev_thread(void *arg) {
             double now = CFAbsoluteTimeGetCurrent();
             if (idle_us < 0) { const char *v = getenv("OAH_EV_IDLE_MS"); idle_us = (v ? atoi(v) : 50) * 1000; if (idle_us < 8000) idle_us = 8000; }
             if (got_prev) last_ev = now;
-            usleep(now - last_ev < 1.0 || g_raise_wid || g_raise_all_at || g_snd_pend_n ? 8000 : idle_us);
+            /* In the background (another app in front, no menu bar items of ours) and quiet for 2 s:
+               OAH_EV_BG_IDLE_MS (default 200; 0 = as in front). A click on one of our windows there
+               activates us first, so the first event waits at most that long; Snow Leopard's
+               apps in the background did not run at all until then. */
+            static int bg_us = -1;
+            if (bg_us < 0) { const char *v = getenv("OAH_EV_BG_IDLE_MS"); bg_us = (v ? atoi(v) : 200) * 1000; }
+            usleep(now - last_ev < 1.0 || g_raise_wid || g_raise_all_at || g_snd_pend_n ? 8000 :
+                   (!g_app_active && !g_sb_n && now - last_ev >= 2.0 && bg_us > idle_us) ? bg_us : idle_us);
         }
         while (p_CGEventCreateNextEvent && (e = p_CGEventCreateNextEvent(cid))) {
             int t = p_CGEventGetType ? p_CGEventGetType(e) : -1;
@@ -2581,7 +2594,7 @@ static void *oah_inj_thread(void *arg) {
     for (;;) {
         FILE *f;
         char ln[1024];
-        usleep(250000);                          /* test input files are rare: 4 checks a second */
+        usleep(1000000);                         /* test input files are rare: one check a second */
         if (!(f = fopen(pf, "r"))) continue;
         unlink(pf);
         while (fgets(ln, sizeof ln, f)) {
@@ -2981,6 +2994,125 @@ static unsigned int oah_cgs_hit_nonpass(float x, float y) {
     }
     return found;
 }
+/* ---- drag regions: textured windows move when dragged by their background ----
+   AppKit 10.6 gives the window server the parts of a textured ("metal" / unified toolbar) window
+   that move it - CGSAddDragRegion(cid, wid, region): the window minus its controls - and the 10.6
+   server moved the window itself when a drag started there; AppKit never moves such a window.
+   Those calls were accepted no-ops, so the windows of Pages, Keynote and other iWork / textured
+   apps could not be moved at all (title bar included). Now the regions are kept (a guest copy per
+   window) and a left drag that starts in one moves the window here, with its movement group;
+   AppKit gets a window-moved event at the end. The events still reach the app as before.
+   OAH_NO_DRAGREGION=1 disables. */
+#define OAH_DRG_MAX 64
+static struct { unsigned int wid, rgn; } g_drg[OAH_DRG_MAX];
+static unsigned int g_mv_wid;              /* window being moved by a background drag */
+static double g_mv_dx, g_mv_dy;            /* pointer offset in it */
+static int g_mv_moved;
+static void oah_cgs_sb_notify(unsigned int wid);
+static void oah_cgs_mgroup_moved(unsigned int parent, double dx, double dy, int depth);
+static int oah_drg_off(void) {
+    static int off = -1;
+    if (off < 0) off = getenv("OAH_NO_DRAGREGION") ? 1 : 0;
+    return off;
+}
+static int oah_drg_find(unsigned int wid) {
+    int i;
+    for (i = 0; i < OAH_DRG_MAX; i++) if (g_drg[i].wid == wid) return i;
+    return -1;
+}
+static void oah_drg_release(unsigned int rgn) {
+    static unsigned int frel;
+    unsigned int a[1];
+    if (!rgn) return;
+    if (!frel) frel = oah_cgs_gsym("_CGSReleaseRegion");
+    a[0] = rgn;
+    if (frel) oah_callppc_n("CGSReleaseRegion", frel, 1, a);
+}
+static void oah_drg_clear(unsigned int wid) {
+    int i = oah_drg_find(wid);
+    if (i < 0) return;
+    oah_drg_release(g_drg[i].rgn);
+    g_drg[i].wid = 0; g_drg[i].rgn = 0;
+    if (g_mv_wid == wid) g_mv_wid = 0;
+}
+static void oah_drg_add(unsigned int wid, unsigned int rgn) {
+    static unsigned int fcopy, funion, slot;
+    unsigned int out = 0, a[3], c;
+    int i;
+    if (!wid || !rgn) return;
+    if (!fcopy) { fcopy = oah_cgs_gsym("_CGSCopyRegion"); funion = oah_cgs_gsym("_CGSUnionRegion"); }
+    if (!fcopy) return;
+    a[0] = rgn; a[1] = (unsigned int)&out;
+    oah_callppc_n("CGSCopyRegion", fcopy, 2, a);
+    c = oah_get32((unsigned int)&out);
+    if (!c) return;
+    i = oah_drg_find(wid);
+    if (i >= 0 && g_drg[i].rgn && funion) {           /* added to what the window has */
+        out = 0; a[0] = g_drg[i].rgn; a[1] = c; a[2] = (unsigned int)&out;
+        oah_callppc_n("CGSUnionRegion", funion, 3, a);
+        if (oah_get32((unsigned int)&out)) {
+            oah_drg_release(g_drg[i].rgn); oah_drg_release(c);
+            g_drg[i].rgn = oah_get32((unsigned int)&out);
+            return;
+        }
+        oah_drg_release(g_drg[i].rgn);
+        g_drg[i].rgn = c;
+        return;
+    }
+    if (i < 0) i = oah_drg_find(0);
+    if (i < 0) { i = (int)(slot++ % OAH_DRG_MAX); oah_drg_release(g_drg[i].rgn); }   /* full: reuse one */
+    g_drg[i].wid = wid; g_drg[i].rgn = c;
+}
+static int oah_drg_hit(unsigned int wid, double lx, double ly) {
+    static unsigned int fin;
+    unsigned int a[2], pt[2];
+    int i = oah_drg_find(wid);
+    if (i < 0 || !g_drg[i].rgn) return 0;
+    if (!fin) fin = oah_cgs_gsym("_CGSPointInRegion");
+    if (!fin) return 0;
+    oah_putf((unsigned int)&pt[0], (float)lx); oah_putf((unsigned int)&pt[1], (float)ly);
+    a[0] = g_drg[i].rgn; a[1] = (unsigned int)pt;
+    return (oah_callppc_n("CGSPointInRegion", fin, 2, a) & 0xff) != 0;
+}
+static void oah_drg_move(oah_cgswin_t *w, double x, double y) {
+    NCGS(int, CGSMoveWindow, (unsigned int, unsigned int, const oah_pt_t *));
+    static int (*mwg)(unsigned int, unsigned int, const oah_pt_t *);
+    static int init;
+    oah_pt_t p;
+    double dx = x - w->x, dy = y - w->y;
+    if (!dx && !dy) return;
+    if (!init) { init = 1; if (!getenv("OAH_NO_MOVEGROUP")) *(void **)&mwg = dlsym(RTLD_DEFAULT, "CGSMoveWindowWithGroup"); }
+    p.x = x; p.y = y;
+    w->x = (float)x; w->y = (float)y;
+    if (mwg) { mwg(oah_cgs_cid(), w->wid, &p); oah_cgs_mgroup_moved(w->wid, dx, dy, 0); }
+    else if (p_CGSMoveWindow) p_CGSMoveWindow(oah_cgs_cid(), w->wid, &p);
+}
+/* the mouse part of the event path: start, follow and end a background drag */
+static void oah_drg_event(int type, unsigned int wid, oah_cgswin_t *w, double px, double py, double lx, double ly, unsigned int flags) {
+    if (oah_drg_off()) return;
+    if (type == 1) {
+        g_mv_wid = 0;
+        if (w && !w->ghost && w->level < 24 && wid != g_menubar_wid && !(flags & 0x100000) &&
+            oah_drg_find(wid) >= 0 && oah_drg_hit(wid, lx, ly)) {
+            g_mv_wid = wid; g_mv_dx = lx; g_mv_dy = ly; g_mv_moved = 0;
+            CGSLOG("[drag] background drag may start in window %u at %.0f,%.0f\n", wid, lx, ly);
+        }
+    } else if (type == 6 && g_mv_wid) {
+        oah_cgswin_t *mw = oah_cgs_win(g_mv_wid);
+        double ny = py - g_mv_dy;
+        if (!mw) { g_mv_wid = 0; return; }
+        if (ny < 22) ny = 22;                     /* the title stays below the menu bar */
+        oah_drg_move(mw, px - g_mv_dx, ny);
+        g_mv_moved = 1;
+    } else if (type == 2 && g_mv_wid) {
+        if (g_mv_moved) {
+            oah_cgs_sb_notify(g_mv_wid);
+            CGSLOG("[drag] window %u moved to %.0f,%.0f\n", g_mv_wid, oah_cgs_win(g_mv_wid) ? oah_cgs_win(g_mv_wid)->x : 0,
+                   oah_cgs_win(g_mv_wid) ? oah_cgs_win(g_mv_wid)->y : 0);
+        }
+        g_mv_wid = 0;
+    }
+}
 static unsigned int oah_ev_to_guest(void *e) {
     static unsigned int fcreate, fseti, fsetuni;
     NCGS(int, CGEventGetType, (void *));
@@ -3141,6 +3273,7 @@ static unsigned int oah_ev_to_guest(void *e) {
                 p_CGEventGetIntegerValueField(e, 91), p_CGEventGetIntegerValueField(e, 51));
     if (type == 5 || type == 6 || type == 7 || type == 27) oah_trk_motion(wid, p.x, p.y);
     wl.x = w ? p.x - w->x : p.x; wl.y = w ? p.y - w->y : p.y;
+    if (type == 1 || type == 2 || type == 6) oah_drg_event(type, wid, w, p.x, p.y, wl.x, wl.y, (unsigned int)p_CGEventGetFlags(e));
     oah_put32(rec + 8, type);
     oah_putf(rec + 0xc, p.x); oah_putf(rec + 0x10, p.y);
     oah_putf(rec + 0x14, wl.x); oah_putf(rec + 0x18, wl.y);
@@ -4866,11 +4999,17 @@ static int oah_cgs_call(const char *n, unsigned int *R) {
         if (w) {
             w->dsh_added = 1;
             if (!R[5] || !oah_cgs_region_bounds_try(R[5], &db) || (db.w > 0 && db.h > 0)) w->dsh_nonempty = 1;
-            else if (getenv("OAH_BLITLOG")) fprintf(stderr, "[blit] empty dirty-shape addition to %u (region %08x %.0f,%.0f %.0fx%.0f)\n", w->wid, R[5], db.x, db.y, db.w, db.h);
+            else if (oah_blitlog()) fprintf(stderr, "[blit] empty dirty-shape addition to %u (region %08x %.0f,%.0f %.0fx%.0f)\n", w->wid, R[5], db.x, db.y, db.w, db.h);
         }
         R[3] = 0; return 1;
     }
-    if (!strcmp(n, "CGSAddDragRegion") || !strcmp(n, "CGSClearDragRegion")) { R[3] = 0; return 1; }
+    if (!strcmp(n, "CGSAddDragRegion") || !strcmp(n, "CGSClearDragRegion")) {   /* (cid, wid[, region]) */
+        if (!oah_drg_off()) {
+            if (n[3] == 'A') oah_drg_add(R[4], R[5]); else oah_drg_clear(R[4]);
+            CGSLOG("[drag] %s(wid %u%s)\n", n, R[4], n[3] == 'A' ? ", region" : "");
+        }
+        R[3] = 0; return 1;
+    }
     if (!strcmp(n, "CGSSetWindowShape") || !strcmp(n, "CGSSetWindowShapeWithWeighting") ||
         (!strcmp(n, "CGSShapeWindow") && !getenv("OAH_NO_SHAPEWINDOW"))) {
         /* (cid, wid, float x, float y, shape [, weighting]). AppKit 10.6's live resize uses
@@ -5464,7 +5603,7 @@ static int oah_cgs_call(const char *n, unsigned int *R) {
                    the default button blinked out as the alert appeared. */
                 if (skip && now - w->shown_t < 1.0) skip = 0;
             }
-            if (skip && getenv("OAH_BLITLOG")) {
+            if (skip && oah_blitlog()) {
                 oah_rect_t sb = {0, 0, 0, 0};
                 if (R[5]) oah_cgs_region_bounds_try(R[5], &sb);
                 fprintf(stderr, "[blit] skipped empty flush of %u (region %08x %.0f,%.0f %.0fx%.0f, dsh_added %d)\n", w->wid, R[5], sb.x, sb.y, sb.w, sb.h, w->dsh_added);

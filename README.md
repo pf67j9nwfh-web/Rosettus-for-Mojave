@@ -24,7 +24,7 @@ TextWrangler, Adobe CS2, Transmission, and Hex Fiend. See [docs/COMPATIBILITY.md
 > The repository holds only  this project's own code, a list of the files to copy (names and checksums), 
 > and small binary patches containing only the bytes this project changes.
 
-**Rosettus for Mojave 1.1** is the current release: see [RELEASE_NOTES.md](RELEASE_NOTES.md).
+**Rosettus for Mojave 1.2** is the current release: see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 For macOS 10.15 Catalina there is a separate port, **Rosettus for Catalina**.
 
 ## Requirements
@@ -210,6 +210,12 @@ not carried over.
 in that app, as if they were dropped on its Dock icon. Dragging inside a PowerPC app works too
 (moving selected text in TextWrangler, for example). Drags from a PowerPC app to a native app, and
 text or pictures dragged from native apps into a PowerPC app, are not carried over yet.
+
+**Menu bar apps.** A PowerPC app's status items (NSStatusItem) show in Mojave's menu bar, at the
+left of the system's, and open their menus. This works for apps that are also in the Dock, for
+menu-bar-only apps (LSUIElement), and for apps that change their item's title or put themselves in
+and out of the Dock while running. Hiding such an app leaves its item in the menu bar. In Dark Mode
+the items' titles are drawn light. When one of these apps quits, the other PowerPC items move over to close the gap. Items drawn as pictures (a template glyph, a colour icon, or an icon with a title) work as well as text ones, and an app that puts itself in the Dock gets its own menus in the menu bar.
 
 **Retina displays.** The titles of a PowerPC app's menus in Mojave's menu bar are drawn natively
 at full Retina resolution (in Lucida Grande, the font the app laid them out with), so they are as

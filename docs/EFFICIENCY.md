@@ -15,7 +15,20 @@ Rosetta on a 2007 MacBook Pro with Snow Leopard. Approximate figures.
 * In the background an app settles at about 0.5 % CPU (0.01 s every 2 s). Switching away from it
   costs a short burst of about 0.5-1.5 s of CPU, for the inactive redraw and the clipboard check.
 * **Event pump:** the window server is polled every 8 ms only while events arrive, and every 50 ms
-  after a second of quiet (`OAH_EV_IDLE_MS`).
+  after a second of quiet (`OAH_EV_IDLE_MS`). In the background (another app in front) and after 2 s of quiet,
+  every 200 ms (`OAH_EV_BG_IDLE_MS`); apps with menu bar items keep 50 ms. Idle CPU in the
+  background: Hex Fiend 13.7 -> 11.3 ms/s (Mojave), 14.8 -> 12.2 ms/s (Catalina); TextWrangler
+  24.5 -> 22.8 ms/s (Catalina).
+* **Sound output:** once an app had played a sound, the output unit (Mojave) or the thread mixing
+  for the host (Catalina, 250 wake-ups a second) ran until the app quit. It now stops after 10 s of
+  silence with nothing queued, and the next Sound Manager call starts it again
+  (`OAH_SND_IDLE_SECS`). Apps that stream continuously (Kid Pix's drawing screen) keep it running.
+* The test-input file is checked once a second instead of four times.
+* **Default buttons:** HIToolbox and AppKit 10.6 pulse the default button of the front window
+  at 30 frames a second. Carbon default buttons are no longer animated; Cocoa ones draw one
+  heartbeat frame every 2 s (that frame is what makes them blue). Idle CPU with the dialog open:
+  Word 2004's Project Gallery 120 -> 10 ms/s (Mojave), TextWrangler's Open panel 152 -> 55 ms/s.
+  `OAH_BUTTON_PULSE=1` keeps the pulse.
 * **Helper agents:** the pasteboard, font server, font worker and coreservicesd start on demand and
   quit 30 s after the last PowerPC app.
 * **No Terminal:** apps start directly from Rosettus Launcher, from patched bundles or from launcher

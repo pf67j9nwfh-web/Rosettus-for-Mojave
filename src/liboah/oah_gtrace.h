@@ -2015,7 +2015,150 @@ static void oah_fix_transform(unsigned int *R) {
     }
 }
 static int oah_want_transformfix(void) { return !getenv("OAH_NO_TRANSFORMFIX"); }
+/* CGWindowContextCreateImage(ctx): an image of a window's contents. The guest asked it of the
+   window contexts CGWindowContextCreate gave it, which here are bitmap contexts over our store, so
+   CG answered "invalid context" and NULL: iWork '09 renders its 3D charts with OpenGL in an
+   offscreen window and takes them onto the canvas this way, and they stayed blank. Now: the
+   window's OpenGL pixels (if a context draws on it) go into the store, and the image is the
+   window's part of the store. OAH_NO_WCTXIMAGE=1: the guest's own function. */
+static void oah_fix_wctximg(unsigned int *R) {
+    static unsigned int fimg, fcrop, frel;
+    oah_cgswin_t *w = oah_cgs_win_by_ctx(R[3]);
+    unsigned int a[5], full, img;
+    float r[4];
+    int sc, wpx, hpx;
+    if (!w || !w->store) return;
+    if (!fimg) { fimg = oah_cgs_gsym("_CGBitmapContextCreateImage"); fcrop = oah_cgs_gsym("_CGImageCreateWithImageInRect"); frel = oah_cgs_gsym("_CGImageRelease"); }
+    if (!fimg || !fcrop || !frel) return;
+    sc = WSC(w); wpx = (int)(w->w * sc + 0.5f); hpx = (int)(w->h * sc + 0.5f);
+    if (wpx <= 0 || hpx <= 0) return;
+    oah_glx_read_window(w->wid, w->store, WRB(w), WROWS(w), wpx, hpx);
+    a[0] = R[3];
+    full = oah_callppc_n("CGBitmapContextCreateImage", fimg, 1, a);
+    if (!full) return;
+    r[0] = 0; r[1] = (float)(WROWS(w) - hpx); r[2] = (float)wpx; r[3] = (float)hpx;   /* image space: rows from the top */
+    a[0] = full; memcpy(&a[1], &r[0], 4); memcpy(&a[2], &r[1], 4); memcpy(&a[3], &r[2], 4); memcpy(&a[4], &r[3], 4);
+    img = oah_callppc_n("CGImageCreateWithImageInRect", fcrop, 5, a);
+    a[0] = full; oah_callppc_n("CGImageRelease", frel, 1, a);
+    if (!img) return;
+    {   static int nlog; if (nlog++ < 20) fprintf(stderr, "[cgs] CGWindowContextCreateImage(%08x): window %u, %dx%d -> image %08x\n", R[3], w->wid, wpx, hpx, img); }
+    g_gt_skip = 1; g_gt_skip_ret = img;
+}
+static int oah_want_wctximg(void) { return !getenv("OAH_NO_WCTXIMAGE"); }
+/* Default push buttons (Carbon). HIToolbox 10.6 pulses the default button of the front app's
+   active window at 30 frames a second (HIPushButton::SyncDefaultButtonAnimationTimer starts an
+   HIStandardAnimator), each frame drawn by the translated toolbox: 9-12 % of a core for as long as
+   Word 2004's Project Gallery or any dialog with a default button is open. Current macOS no
+   longer pulses default buttons, and neither do these: the timer is never started (its argument,
+   start or stop, is made "stop"); the button is drawn as a default button without the pulse.
+   OAH_BUTTON_PULSE=1 keeps the pulse. */
+static void oah_fix_nopulse(unsigned int *R) { R[4] = 0; }
+static int oah_want_nopulse(void) { return !getenv("OAH_BUTTON_PULSE"); }
+/* Nonvolatile float registers across a synchronous host lookup. During CFHostStartInfoResolution
+   (CFNetwork 10.6) the translator stops the thread with SIGTRAP some 40 times, and the caller gets
+   f31 = 0 and f30 = 9000 back (tests/ppc/fpsave.c, fphost.c): stock Rosetta on Snow Leopard does
+   the same. f14-f31 belong to the caller (PowerPC ABI), so they are kept here: saved on the way in,
+   put back on the way out (cfnet's first fetch timed out at once: its start time was in f31).
+   OAH_NO_FPKEEP=1 leaves them as the translator returns them. */
+#define OAH_FPKEEP_DEPTH 8
+typedef struct { int n; double f[OAH_FPKEEP_DEPTH][18]; } oah_fpkeep_t;
+static pthread_key_t g_fpkeep_key;
+static pthread_once_t g_fpkeep_once = PTHREAD_ONCE_INIT;
+static void oah_fpkeep_mkkey(void) { pthread_key_create(&g_fpkeep_key, free); }
+static oah_fpkeep_t *oah_fpkeep_st(void) {
+    oah_fpkeep_t *k;
+    pthread_once(&g_fpkeep_once, oah_fpkeep_mkkey);
+    k = (oah_fpkeep_t *)pthread_getspecific(g_fpkeep_key);
+    if (!k) { k = (oah_fpkeep_t *)calloc(1, sizeof *k); pthread_setspecific(g_fpkeep_key, k); }
+    return k;
+}
+static void oah_fix_fpkeep(unsigned int *R) {
+    const double *F = (const double *)((unsigned char *)R + 0x1e8);
+    oah_fpkeep_t *k = oah_fpkeep_st();
+    if (!k) return;
+    if (k->n < OAH_FPKEEP_DEPTH) memcpy(k->f[k->n], F + 14, sizeof k->f[0]);
+    k->n++;
+}
+static void oah_fixret_fpkeep(unsigned int *R, unsigned int a0) {
+    double *F = (double *)((unsigned char *)R + 0x1e8);
+    oah_fpkeep_t *k = oah_fpkeep_st();
+    (void)a0;
+    if (!k || k->n <= 0) return;
+    k->n--;
+    if (k->n < OAH_FPKEEP_DEPTH) {
+        if (getenv("OAH_FPKEEP_LOG") && memcmp(F + 14, k->f[k->n], sizeof k->f[0]))
+            fprintf(stderr, "[fpkeep] CFHostStartInfoResolution changed f14-f31 (f30 %g f31 %g): put back\n", F[30], F[31]);
+        memcpy(F + 14, k->f[k->n], sizeof k->f[0]);
+    }
+}
+static int oah_want_fpkeep(void) { return !getenv("OAH_NO_FPKEEP"); }
+/* Uptime in milliseconds. Duration is a signed 32-bit count of milliseconds, so AbsoluteToDuration
+   answers kDurationForever (0x7fffffff) for any time past 2^31 ms: on a Mac that has been up for more
+   than 24.8 days, AbsoluteToDuration(UpTime()) - the millisecond clock of many games ported from
+   Windows (GetTickCount / timeGetTime) - stops. Build-a-lot 2 then waits forever in its frame pacing
+   (CHipGameMgr::Snooze) at the HipSoft splash screen; on Snow Leopard the same happens on a Mac up for
+   that long. When the Mac has been up for 2^30 ms (12.4 days) or more at the app's start, an
+   AbsoluteTime handed to AbsoluteToDuration that is at least the app's start time minus one hour is
+   taken as an UpTime() reading and counted from that point instead (a real duration that long is
+   not met in practice), so such a clock starts at one hour and runs for 24 days. Differences of two
+   readings are unchanged. OAH_NO_UPTIMEFIX=1 turns this off; OAH_UPTIMEFIX=1 turns it on whatever
+   the uptime (for testing); OAH_UPTIMEFIX_LOG=1 logs when it is on. */
+#include <mach/mach_time.h>
+static unsigned long long g_uptime_base;
+static int g_uptime_on;
+static pthread_once_t g_uptime_once = PTHREAD_ONCE_INIT;
+static void oah_uptime_init(void) {
+    mach_timebase_info_data_t tb;
+    unsigned long long now = mach_absolute_time(), hour;
+    if (mach_timebase_info(&tb) || !tb.numer || !tb.denom) {
+        if (getenv("OAH_UPTIMEFIX_LOG")) fprintf(stderr, "[uptime] no timebase: nanoseconds assumed\n");
+        tb.numer = tb.denom = 1;
+    }
+    hour = 3600000000000ULL * tb.denom / tb.numer;
+    if (now / hour * 3600000ULL < (1ULL << 30) && !getenv("OAH_UPTIMEFIX")) return;   /* up for less than 12.4 days: nothing to do */
+    if (now < hour) hour = now;
+    g_uptime_base = now - hour;
+    g_uptime_on = 1;
+    if (getenv("OAH_UPTIMEFIX_LOG"))
+        fprintf(stderr, "[uptime] up for %llu h: AbsoluteToDuration counts UpTime() readings from 1 h before the start\n", now / hour);
+}
+static void oah_fix_uptime(unsigned int *R) {      /* Duration AbsoluteToDuration(AbsoluteTime): r3 high, r4 low */
+    unsigned long long t;
+    pthread_once(&g_uptime_once, oah_uptime_init);
+    if (!g_uptime_on) return;
+    t = ((unsigned long long)R[3] << 32) | R[4];
+    if (t < g_uptime_base) return;
+    t -= g_uptime_base;
+    R[3] = (unsigned int)(t >> 32); R[4] = (unsigned int)t;
+}
+static int oah_want_uptimefix(void) {
+    if (getenv("OAH_NO_UPTIMEFIX")) return 0;
+    pthread_once(&g_uptime_once, oah_uptime_init);
+    return g_uptime_on;
+}
+/* Cocoa: AppKit 10.6 pulses the default button from its heartbeat thread (NSUIHeartBeat), at the
+   same cost: 15 % of a core for TextWrangler with its Open panel up. The heartbeat is also what
+   draws the button blue, so it stays, but each default button cell draws a frame once and then
+   once every 2 s (-heartBeat: is skipped in between): a steady blue button. */
+static void oah_fix_nopulse_cocoa(unsigned int *R) {
+    static struct { unsigned int cell; double t; } seen[64];
+    static unsigned int next;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    double now = CFAbsoluteTimeGetCurrent();
+    int k, skip = 0;
+    pthread_mutex_lock(&mu);
+    for (k = 0; k < 64; k++) if (seen[k].cell == R[3]) break;
+    if (k < 64) { if (now - seen[k].t < 2.0) skip = 1; else seen[k].t = now; }
+    else { k = (int)(next++ % 64); seen[k].cell = R[3]; seen[k].t = now; }
+    pthread_mutex_unlock(&mu);
+    if (skip) { g_gt_skip = 1; g_gt_skip_ret = 0; }
+}
 static const struct { const char *lib, *sym; void (*fix)(unsigned int *); void (*fixret)(unsigned int *, unsigned int); int (*want)(void); int follow; } g_gt_fixes[] = {
+    { "CoreGraphics", "_CGWindowContextCreateImage", oah_fix_wctximg, 0, oah_want_wctximg },
+    { "HIToolbox", "__ZN12HIPushButton31SyncDefaultButtonAnimationTimerEh", oah_fix_nopulse, 0, oah_want_nopulse },
+    { "AppKit", "-[NSButtonCell(NSDefaultButtonIndicatorPrivate) heartBeat:]", oah_fix_nopulse_cocoa, 0, oah_want_nopulse },
+    { "CFNetwork", "_CFHostStartInfoResolution", oah_fix_fpkeep, oah_fixret_fpkeep, oah_want_fpkeep },
+    { "CarbonCore", "_AbsoluteToDuration", oah_fix_uptime, 0, oah_want_uptimefix },
     { "HIServices", "_TransformProcessType", oah_fix_transform, 0, oah_want_transformfix },
     { "libSystem.B.dylib", "_NSIsSymbolNameDefined", oah_fix_alc_defined, 0, oah_alc_want },
     { "libSystem.B.dylib", "_NSLookupAndBindSymbol", oah_fix_alc_lookup, 0, oah_alc_want },

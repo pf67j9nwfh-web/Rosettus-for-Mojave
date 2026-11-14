@@ -26,7 +26,7 @@
  X(glPopMatrix) X(glProgramStringARB) X(glPushAttrib) X(glPushMatrix) X(glRasterPos3f) X(glReadBuffer) \
  X(glReadPixels) X(glScissor) X(glShadeModel) X(glStencilMask) X(glTexCoordPointer) X(glTexEnvf) \
  X(glTexEnvfv) X(glTexEnvi) X(glTexImage2D) X(glTexParameteri) X(glTexSubImage2D) \
- X(glVertexArrayParameteriAPPLE) X(glVertexArrayRangeAPPLE) X(glVertexPointer) X(glViewport) \
+ X(glVertexArrayParameteriAPPLE) X(glVertexArrayRangeAPPLE) X(glVertexPointer) X(glViewport) X(glInterleavedArrays) \
  X(glWindowPos2iARB) X(gluOrtho2D) \
  X(aglChoosePixelFormat) X(aglCreateContext) X(aglDescribePixelFormat) X(aglDescribeRenderer) \
  X(aglDestroyContext) X(aglDestroyPixelFormat) X(aglDestroyRendererInfo) X(aglDisable) X(aglEnable) \
@@ -510,6 +510,56 @@ static int oah_gl_call(unsigned int idx, oah_gen_t *g, U *R) {
     case OP_glVertexPointer: case OP_glColorPointer: case OP_glTexCoordPointer: {
         oah_arr_t *a = &g_vao->a[op == OP_glVertexPointer ? 0 : op == OP_glColorPointer ? 1 : 2 + g_cat];
         a->size = (int)a0; a->type = (int)a1; a->stride = (int)a2; a->ptr = a3;
+        return 1;
+    }
+    case OP_glInterleavedArrays: {
+        /* glInterleavedArrays(format, stride, pointer): one call that sets the vertex, colour, normal and
+           (active unit's) texture coordinate arrays and turns them on or off. Passed through, the native
+           GL read the guest's big-endian floats, and the arrays it turned on were turned off again at
+           the next glDrawArrays (only the recorded ones are kept). iWork '09 draws the selection
+           handles of shapes, text boxes and pictures this way (SFDCanvas drawQueuedDecorations, format
+           T2F_V3F): there were none. Here it becomes the separate pointer calls, as the spec defines
+           it, and the arrays are converted at draw time like the others. */
+        static const struct { U fmt; signed char st, sc, ctype, sv, pc, pn, pv, sz; } F[] = {
+            /* fmt     st sc  c  sv  pc  pn  pv  size (in 4-byte units; -1 none; c: 0 float, 1 ubyte) */
+            { 0x2A20, 0, 0, 0, 2, -1, -1, 0, 2 },     /* V2F */
+            { 0x2A21, 0, 0, 0, 3, -1, -1, 0, 3 },     /* V3F */
+            { 0x2A22, 0, 4, 1, 2, 0, -1, 1, 3 },      /* C4UB_V2F */
+            { 0x2A23, 0, 4, 1, 3, 0, -1, 1, 4 },      /* C4UB_V3F */
+            { 0x2A24, 0, 3, 0, 3, 0, -1, 3, 6 },      /* C3F_V3F */
+            { 0x2A25, 0, 0, 0, 3, -1, 0, 3, 6 },      /* N3F_V3F */
+            { 0x2A26, 0, 4, 0, 3, 0, 4, 7, 10 },      /* C4F_N3F_V3F */
+            { 0x2A27, 2, 0, 0, 3, -1, -1, 2, 5 },     /* T2F_V3F */
+            { 0x2A28, 4, 0, 0, 4, -1, -1, 4, 8 },     /* T4F_V4F */
+            { 0x2A29, 2, 4, 1, 3, 2, -1, 3, 6 },      /* T2F_C4UB_V3F */
+            { 0x2A2A, 2, 3, 0, 3, 2, -1, 5, 8 },      /* T2F_C3F_V3F */
+            { 0x2A2B, 2, 0, 0, 3, -1, 2, 5, 8 },      /* T2F_N3F_V3F */
+            { 0x2A2C, 2, 4, 0, 3, 2, 6, 9, 12 },      /* T2F_C4F_N3F_V3F */
+            { 0x2A2D, 4, 4, 0, 4, 4, 8, 11, 15 },     /* T4F_C4F_N3F_V4F */
+        };
+        int i, k = -1;
+        for (i = 0; i < (int)(sizeof F / sizeof F[0]); i++) if (F[i].fmt == a0) { k = i; break; }
+        if (k < 0) { if (fn) ((void (*)(U, U, U))fn)(a0, a1, a2); return 1; }   /* GL_INVALID_ENUM from the native GL */
+        {
+            int st = (int)a1 ? (int)a1 : 4 * F[k].sz;
+            void (*dcs)(U) = (void (*)(U))GLF(glDisableClientState);
+            oah_arr_t *v = &g_vao->a[0], *c = &g_vao->a[1], *t = &g_vao->a[2 + g_cat], *n = &g_vao->a[OAH_ANRM];
+            v->size = F[k].sv; v->type = 0x1406; v->stride = st; v->ptr = a2 + 4 * F[k].pv; v->en = 1;
+            c->en = F[k].sc > 0;
+            if (c->en) { c->size = F[k].sc; c->type = F[k].ctype ? 0x1401 : 0x1406; c->stride = st; c->ptr = a2 + 4 * F[k].pc; }
+            t->en = F[k].st > 0;
+            if (t->en) { t->size = F[k].st; t->type = 0x1406; t->stride = st; t->ptr = a2; if (g_cat + 1 > g_tmax) g_tmax = g_cat + 1; }
+            if (oah_no_nrm()) {   /* OAH_NO_NORMALARR: normals stay native */
+                void (*np)(U, U, U) = (void (*)(U, U, U))GLF(glNormalPointer);
+                if (F[k].pn >= 0) { if (np) np(0x1406, st, a2 + 4 * F[k].pn); ((void (*)(U))GLF(glEnableClientState))(0x8075); }
+                else if (dcs) dcs(0x8075);
+            } else {
+                n->en = F[k].pn >= 0;
+                if (n->en) { n->size = 3; n->type = 0x1406; n->stride = st; n->ptr = a2 + 4 * F[k].pn; }
+            }
+            /* edge flag, index, fog coordinate and secondary colour arrays: off, as the spec says */
+            if (dcs) { dcs(0x8079); dcs(0x8077); dcs(0x8457); dcs(0x845E); }
+        }
         return 1;
     }
     case OP_glNormalPointer: {

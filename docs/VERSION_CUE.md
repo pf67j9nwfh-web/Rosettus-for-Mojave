@@ -31,7 +31,7 @@ To remove the service, allowing the server and database to finish shutdown:
 sudo /usr/bin/python tools/install_versioncue.py --root /Library/Rosettus --remove
 ```
 
-Rosettus uninstall invokes the same drain procedure before removing the runtime. The helper refuses to replace a controller that remains alive after its shutdown deadline; it does not force-kill the database. Existing Adobe workspace files remain in place.
+Rosettus uninstall invokes the same drain procedure before removing the runtime. If the server is still shutting down after 90 s (`VC_STOP_TIMEOUT` in the service's environment), the controller ends the server and its database (the server's process group) so the service can be started again. The helper waits up to 150 s for the controller to exit, ends it if it has not, and always starts the service again if an install fails part-way. Existing Adobe workspace files remain in place.
 
 ## Implementation
 

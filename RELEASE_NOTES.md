@@ -3,6 +3,39 @@
 Rosettus 1.0 is now called **Rosettus for Mojave**. The port to macOS 10.15 Catalina is a separate
 project, **Rosettus for Catalina**.
 
+## Rosettus for Mojave 1.2
+
+**November 13, 2026 - menu bar apps, iWork charts, and less work in the background.**
+
+**PowerPC menu bar apps work.** Their status items now show in the menu bar (before, none showed),
+open their menus and run their commands: apps that are also in the Dock, menu-bar-only apps, and
+apps that change their item or move themselves into and out of the Dock while running. Hiding such
+an app leaves its item in the menu bar, and in Dark Mode the items' titles are drawn light.
+When one of these apps quits, the other PowerPC items move over to close the gap. Items drawn as pictures (a template glyph, a colour icon, or an icon with a title) work as well as text ones, and an app that puts itself in the Dock gets its own menus in the menu bar.
+
+**Textured windows can be moved again.** The windows of Pages, Keynote, Numbers and other apps with textured or unified-toolbar windows did not move when dragged by the title bar or the toolbar background: Snow Leopard's window server moved those itself (AppKit only told it which parts of the window may be dragged), and that part was missing. Rosettus now moves them.
+
+**Charts in Pages, Keynote and Numbers '09.** Inserting a chart showed "An unexpected error has occurred" and 3D charts stayed blank. iWork draws charts with OpenGL into offscreen buffers (pbuffers) that current macOS no longer creates; Rosettus now provides them itself, and copies the finished 3D chart into the document's canvas. 2D and 3D charts are drawn as on Snow Leopard.
+
+**Less work in the background.** An app behind other apps checks for input less often (at most 0.2 s before the click that brings it forward is handled), and an app that has made a sound no longer keeps the sound output running: it stops after 10 s of silence and starts again with the next sound.
+
+**Default buttons no longer pulse.** Snow Leopard animated the default button of every dialog at 30 frames a second, and redrawing it through the translated toolbox cost 10-15 % of a core for as long as a dialog was open (Word 2004's Project Gallery, an Open panel). Default buttons are now drawn blue without the pulse, as on current macOS. `OAH_BUTTON_PULSE=1` brings the pulse back.
+
+**Helper tools stay in the background.** A PowerPC program that is not an application (no .app bundle, no CFM application, no 'APPL' file type) no longer becomes the front app when it draws or connects to the window server, as on Snow Leopard. Office 2004's FontCacheTool ("Optimizing font menu performance", started by Word, Excel and PowerPoint) took the front from the Office app while it started, so its first keystrokes went nowhere. `OAH_TOOL_FOREGROUND=1` restores the old behaviour.
+
+**Floating-point values survive a host-name lookup.** After `CFHostStartInfoResolution` (a synchronous host lookup, also used inside CFNetwork's socket and HTTP streams) the caller's floating-point registers f30 and f31 came back changed (stock Rosetta on Snow Leopard does the same). Rosettus now puts f14-f31 back, as the PowerPC calling convention requires: a first network fetch could time out at once when its start time was kept in one of them. `OAH_NO_FPKEEP=1` turns this off.
+
+**Selection handles in Pages, Keynote and Numbers '09.** A selected text box, shape, picture or chart showed no handles: the small white squares at its corners and edges that show its outline and are dragged to resize it. iWork draws them with OpenGL from one interleaved vertex array (`glInterleavedArrays`), which Rosettus passed to the native OpenGL unconverted (PowerPC byte order) and then switched off again before drawing. It is now converted like the other vertex arrays, and the handles show as on Snow Leopard.
+
+**Version Cue no longer sticks at "Stopping".** When the Version Cue CS2 server hung while shutting down (its database kept running), the Version Cue preference pane showed "Stopping Version Cue CS2..." with its controls disabled for good, and reinstalling Rosettus left the service switched off. The service now ends a shutdown that has not finished after 90 s (the server and its database), so Version Cue can be started again, and the installer always starts the service again, even when it could not replace it. `VC_STOP_TIMEOUT` sets the wait in seconds.
+
+**Games keep running on a Mac that has been up for weeks.** Build-a-lot 2 stopped at the HipSoft splash screen on a Mac that had been running for more than 24.8 days without a restart. Like many games ported from Windows, it keeps time in milliseconds since startup through `AbsoluteToDuration(UpTime())`, and that call can count only up to 2^31 ms (24.8 days); after that it answers "forever" every time, so the game's clock stopped and its frame pacing waited for ever (Snow Leopard does the same). When the Mac has been up for 12 days or more, Rosettus now counts such readings from shortly before the app started, so the clock runs as after a restart. `OAH_NO_UPTIMEFIX=1` turns this off.
+
+**File > Open Recent remembers documents.** In Pages, Keynote, Numbers and other Cocoa apps the Open Recent menu was empty after the app was quit and opened again. Snow Leopard's AppKit keeps that list in the app's own recent-documents list, which Rosettus did not provide; it now comes from macOS's list for that app, as for a native app. The shared lists (the Finder sidebar, Apple menu > Recent Items) are still not changed by PowerPC apps. `OAH_NO_APPRECENT=1` turns this off.
+
+Installing: open **Rosettus for Mojave 1.2.pkg**. It replaces 1.0 or 1.1 in place; launchers and
+patched apps keep working. Nothing needs to be imported again.
+
 ## Rosettus for Mojave 1.1
 
 **November 9, 2026 - a bug-fix release.**
@@ -18,12 +51,6 @@ Two menu bar fixes, brought back from Rosettus for Catalina:
   dark copy of themselves underneath (the shadow of the windows that carry them). It was hard to
   see in Dark Mode but noticeable in Light Mode. The shadow is now turned off
   (`OAH_MB_SHADOW=1` brings it back).
-
-**PowerPC menu bar apps work.** Their status items now show in the menu bar (before, none showed),
-open their menus and run their commands: apps that are also in the Dock, menu-bar-only apps, and
-apps that change their item or move themselves into and out of the Dock while running. Hiding such
-an app leaves its item in the menu bar, and in Dark Mode the items' titles are drawn light.
-When one of these apps quits, the other PowerPC items move over to close the gap. Items drawn as pictures (a template glyph, a colour icon, or an icon with a title) work as well as text ones, and an app that puts itself in the Dock gets its own menus in the menu bar.
 
 Also in this release:
 
